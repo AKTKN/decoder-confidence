@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "decoder-confidence"
+version = "0.1.0"
+description = "Simulation pipeline for decoder confidence evaluation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+	"numpy>=1.24",
+	"stim>=1.12",
+	"polars>=0.20",
+	"pyyaml>=6.0",
+	"beliefmatching",
+	"scipy>=1.10",
+]
+
+[project.optional-dependencies]
+ilp = [
+	"gurobipy",
+]
+mwpm = [
+	"pymatching",
+]
+bplsd = [
+	"ldpc",
+]
+analysis = [
+	"matplotlib",
+	"statsmodels",
+]
+test = [
+	"pytest>=7.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+	"e2e: end-to-end tests",
+]

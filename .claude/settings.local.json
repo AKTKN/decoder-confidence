@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/decoder_confidence/decoding/__main__.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+    ]
+  }
+}

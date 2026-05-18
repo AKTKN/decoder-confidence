@@ -1,0 +1,12 @@
+decoder: BP-LSD
+metric: linearize_logicalgap
+
+decoder_options:
+  # Number of BP iterations before LSD fallback
+  max_iter: 20
+  # BP scheduling: "flooding" or "min_sum"
+  bp_method: min_sum
+  # LSD order (0 = LSD-0, fastest; higher = more accurate)
+  lsd_order: 0
+
+metric_options: {}
