@@ -29,7 +29,7 @@ class ExecutionConfig:
     output_dir: Path
     decoder_factory: DecoderFactory
     num_workers: int
-    initial_probe_shots: int = 1000
+    initial_probe_shots: int = 20
     target_task_seconds: float = 30.0
     max_shots_per_task: int | None = None
     core_ids: tuple[int, ...] | None = None

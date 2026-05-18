@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"import ast; ast.parse\\(open\\('src/decoder_confidence/decoding/__main__.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/decoder_confidence/decoding/__main__.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -m pytest tests/test_argument_reweighting.py -q)",
+      "Bash(python3 -m pytest tests/test_argument_reweighting.py::test_predictions_shape -q)",
+      "Bash(git stash *)"
     ]
   }
 }
