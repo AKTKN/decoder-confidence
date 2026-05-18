@@ -60,3 +60,6 @@ example_outdir/
 .env
 .env.*
 *.local
+
+
+.claude
