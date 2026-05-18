@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -263,6 +264,19 @@ def main(argv: list[str] | None = None) -> int:
 
     decoder_config_path = Path(args.decoder_config)
     decoder_factory, decoder_info = load_decoder_factory(decoder_config_path, dem_path)
+
+    if decoder_info.decoder_name == "ILP":
+        num_threads = int(decoder_info.decoder_options.get("threads") or 1)
+        try:
+            available_cores = len(os.sched_getaffinity(0))
+        except AttributeError:
+            available_cores = os.cpu_count() or 1
+        if num_threads * args.num_workers > available_cores:
+            raise ValueError(
+                f"num_threads ({num_threads}) * num_workers ({args.num_workers}) = "
+                f"{num_threads * args.num_workers} exceeds available cores ({available_cores}). "
+                "Reduce threads in decoder_options or num_workers."
+            )
 
     options_suffix = _format_metric_options(decoder_info.metric_options)
     output_dir = (

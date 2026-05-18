@@ -1,4 +1,5 @@
 metric: logical_gap
 decoder: ILP
 decoder_options:
+  threads: 1
 metric_options:
