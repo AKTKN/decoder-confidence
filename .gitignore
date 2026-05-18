@@ -1,5 +1,6 @@
 # Directory explicitly excluded from version control
 Donotsync/
+cluster/
 
 # Python
 __pycache__/
@@ -63,3 +64,4 @@ example_outdir/
 
 
 .claude
+
