@@ -8,9 +8,9 @@ REMOTE_HOST="cluster"
 # - Globs (*, ?, []) include all matching entries at that level.
 #   Example: "/path/to/results/*" includes everything directly under results.
 REMOTE_SOURCES=(
-	"/home/u592165f/research/decoder-confidence/cluster/sim_data/code=surface_code_Z,d=5,rounds=1,noisemodel=bitflip,p=0.1,xyz=True"
-    "/home/u592165f/research/decoder-confidence/cluster/sim_data/code=surface_code_Z,d=7,rounds=1,noisemodel=bitflip,p=0.1,xyz=True"
-    "/home/u592165f/research/decoder-confidence/cluster/sim_data/code=surface_code_Z,d=9,rounds=1,noisemodel=bitflip,p=0.1,xyz=True"
+	"/home/u592165f/research/decoder-confidence/cluster/sim_data/code=surface_code_Z,d=5,rounds=5,noisemodel=si1000,p=0.001,xyz=False"
+    "/home/u592165f/research/decoder-confidence/cluster/sim_data/code=surface_code_Z,d=7,rounds=7,noisemodel=si1000,p=0.001,xyz=False"
+    "/home/u592165f/research/decoder-confidence/cluster/sim_data/code=surface_code_Z,d=9,rounds=9,noisemodel=si1000,p=0.001,xyz=False"
 )
 
 # Final destination on the local machine
