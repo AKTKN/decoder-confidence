@@ -188,6 +188,7 @@ class _ArgumentReweightingFactory:
 	decoder_options: Mapping[str, Any]
 	metric_name: str
 	metric_options: Mapping[str, Any]
+	use_edge_matrices: bool = False
 
 	def __call__(
 		self, dem: stim.DetectorErrorModel | None = None
@@ -196,7 +197,8 @@ class _ArgumentReweightingFactory:
 			dem = stim.DetectorErrorModel.from_file(str(self.dem_path))
 
 		adapter = build_decoder_adapter(
-			self.base_decoder, dem, self.decoder_options
+			self.base_decoder, dem, self.decoder_options,
+			use_edge_matrices=self.use_edge_matrices,
 		)
 		options = _parse_ar_options(self.metric_name, self.metric_options)
 
@@ -213,6 +215,7 @@ def make_argument_reweighting_factory(
 	decoder_options: Mapping[str, Any],
 	metric_name: str,
 	metric_options: Mapping[str, Any],
+	use_edge_matrices: bool = False,
 ) -> DecoderFactory:
 	return _ArgumentReweightingFactory(
 		dem_path=dem_path,
@@ -220,4 +223,5 @@ def make_argument_reweighting_factory(
 		decoder_options=dict(decoder_options),
 		metric_name=metric_name,
 		metric_options=dict(metric_options),
+		use_edge_matrices=use_edge_matrices,
 	)

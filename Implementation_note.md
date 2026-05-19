@@ -46,3 +46,21 @@ After implementing this, we will start build detail plotting modules.
 
 
 
+## Logical gap Bug
+- logical gapの計算が正しくできていない（めっちゃ小さい）
+- さらに、ILPとMWPMでlogical errorかどうかが完全一致しない場合がある（ほとんどのケースでは一致）
+- さらに、負のgapは実際ありえない
+
+- xyzのfilter_by_basisが悪さをしている可能性大
+    demを見たら、ある一定確率でobservableがflipする（detectorを持たない）error mechanismを発見
+```
+error(0.009407259119903584738) D58
+error(0.004583178730916659914) D58 L0
+error(0.009930558043508837945) D59
+error(0.02936383047437603547) L0
+detector(-0.5, 1.5, 0, 3) D0
+```
+
+今は、step2で想定している量子回路が、両方のbasisのdetectorか、片方のbasisのdetectorのみなのか、ばらばら。統一して、常に、inputとしては、両方のdetectorを含むようにcircuit-generatorの方を修正する。
+
+また、filter_by_basis関数は何らかのバグ。

@@ -144,6 +144,7 @@ class _LinearizeLogicalGapFactory:
     base_decoder: str
     decoder_options: Mapping[str, Any]
     metric_options: Mapping[str, Any]
+    use_edge_matrices: bool = False
 
     def __call__(
         self, dem: stim.DetectorErrorModel | None = None
@@ -151,7 +152,10 @@ class _LinearizeLogicalGapFactory:
         if dem is None:
             dem = stim.DetectorErrorModel.from_file(str(self.dem_path))
 
-        adapter = build_decoder_adapter(self.base_decoder, dem, self.decoder_options)
+        adapter = build_decoder_adapter(
+            self.base_decoder, dem, self.decoder_options,
+            use_edge_matrices=self.use_edge_matrices,
+        )
         options = _parse_linearize_options(self.metric_options)
 
         return LinearizeLogicalGapDecoder(adapter=adapter, options=options)
@@ -162,10 +166,12 @@ def make_linearize_logicalgap_factory(
     base_decoder: str,
     decoder_options: Mapping[str, Any],
     metric_options: Mapping[str, Any],
+    use_edge_matrices: bool = False,
 ) -> DecoderFactory:
     return _LinearizeLogicalGapFactory(
         dem_path=dem_path,
         base_decoder=base_decoder,
         decoder_options=dict(decoder_options),
         metric_options=dict(metric_options),
+        use_edge_matrices=use_edge_matrices,
     )

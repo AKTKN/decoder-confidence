@@ -393,7 +393,9 @@ def _build_gurobi_env(log_to_console: bool):
 
 
 def _build_ilp_adapter(
-    dem: stim.DetectorErrorModel, decoder_options: Mapping[str, Any]
+    dem: stim.DetectorErrorModel,
+    decoder_options: Mapping[str, Any],
+    use_edge_matrices: bool = False,
 ) -> IlpDecoderAdapter:
     try:
         from ilp_decoder import ILPDecoder
@@ -404,21 +406,28 @@ def _build_ilp_adapter(
     matrices = _dem_to_matrices_with_edge_priors(
         dem, allow_undecomposed_hyperedges=True
     )
-    priors = _clip_priors(matrices.priors)
+    if use_edge_matrices:
+        check_mat = matrices.edge_check_matrix
+        obs_mat = matrices.edge_observables_matrix
+        priors = _clip_priors(matrices.edge_priors)
+    else:
+        check_mat = matrices.check_matrix
+        obs_mat = matrices.observables_matrix
+        priors = _clip_priors(matrices.priors)
     config = _build_decoder_config(decoder_options)
     env = _build_gurobi_env(config.log_to_console)
     deps = DecoderDependencies(env=env)
     decoder = ILPDecoder(
-        parity_check_matrix=matrices.check_matrix,
-        observables=matrices.observables_matrix,
+        parity_check_matrix=check_mat,
+        observables=obs_mat,
         prior=priors,
         config=config,
         deps=deps,
     )
     return IlpDecoderAdapter(
         _decoder=decoder,
-        _check_matrix=matrices.check_matrix,
-        _observables_matrix=matrices.observables_matrix,
+        _check_matrix=check_mat,
+        _observables_matrix=obs_mat,
         _priors=priors,
         _config=config,
         _deps=deps,
@@ -442,17 +451,26 @@ def _build_bplsd_decoder(
 
 
 def _build_bplsd_adapter(
-    dem: stim.DetectorErrorModel, decoder_options: Mapping[str, Any]
+    dem: stim.DetectorErrorModel,
+    decoder_options: Mapping[str, Any],
+    use_edge_matrices: bool = False,
 ) -> BpLsdDecoderAdapter:
     matrices = _dem_to_matrices_with_edge_priors(
         dem, allow_undecomposed_hyperedges=True
     )
-    priors = _clip_priors(matrices.priors)
-    decoder = _build_bplsd_decoder(matrices.check_matrix, priors, decoder_options)
+    if use_edge_matrices:
+        check_mat = matrices.edge_check_matrix
+        obs_mat = matrices.edge_observables_matrix
+        priors = _clip_priors(matrices.edge_priors)
+    else:
+        check_mat = matrices.check_matrix
+        obs_mat = matrices.observables_matrix
+        priors = _clip_priors(matrices.priors)
+    decoder = _build_bplsd_decoder(check_mat, priors, decoder_options)
     return BpLsdDecoderAdapter(
         _decoder=decoder,
-        _check_matrix=matrices.check_matrix,
-        _observables_matrix=matrices.observables_matrix,
+        _check_matrix=check_mat,
+        _observables_matrix=obs_mat,
         _priors=priors,
         _decoder_options=dict(decoder_options),
     )
@@ -502,13 +520,15 @@ def build_decoder_adapter(
     decoder_name: str,
     dem: stim.DetectorErrorModel,
     decoder_options: Mapping[str, Any],
+    use_edge_matrices: bool = False,
 ) -> DecoderAdapter:
     normalized = _normalize_decoder_name(decoder_name)
     if normalized == "ILP":
-        return _build_ilp_adapter(dem, decoder_options)
+        return _build_ilp_adapter(dem, decoder_options, use_edge_matrices=use_edge_matrices)
     if normalized in {"BP-LSD", "BPLSD"}:
-        return _build_bplsd_adapter(dem, decoder_options)
+        return _build_bplsd_adapter(dem, decoder_options, use_edge_matrices=use_edge_matrices)
     if normalized in {"MWPM", "PYMATCHING"}:
+        # MWPM always uses edge matrices internally.
         return _build_mwpm_adapter(dem, decoder_options)
 
     raise ValueError(f"Unsupported base decoder for AR: {decoder_name}")

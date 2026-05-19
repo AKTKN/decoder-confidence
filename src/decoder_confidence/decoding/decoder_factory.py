@@ -31,6 +31,7 @@ class DecoderConfigInfo:
 def load_decoder_factory(
     config_path: Path,
     dem_path: Path,
+    use_edge_matrices: bool = False,
 ) -> Tuple[DecoderFactory, DecoderConfigInfo]:
     if not config_path.exists():
         raise FileNotFoundError(f"decoder_config not found: {config_path}")
@@ -65,6 +66,7 @@ def load_decoder_factory(
             decoder_options,
             metric_name,
             metric_options,
+            use_edge_matrices=use_edge_matrices,
         )
         info = DecoderConfigInfo(
             decoder_name=decoder_name,
@@ -82,6 +84,7 @@ def load_decoder_factory(
             decoder_name,
             decoder_options,
             metric_options,
+            use_edge_matrices=use_edge_matrices,
         )
         info = DecoderConfigInfo(
             decoder_name=decoder_name,
@@ -98,7 +101,10 @@ def load_decoder_factory(
             raise ValueError(
                 f"cluster_llr metric requires decoder: BP-LSD, got {decoder_name}"
             )
-        factory = make_cluster_llr_factory(dem_path, decoder_options, metric_options)
+        factory = make_cluster_llr_factory(
+            dem_path, decoder_options, metric_options,
+            use_edge_matrices=use_edge_matrices,
+        )
         info = DecoderConfigInfo(
             decoder_name=decoder_name,
             metric_name=metric_name,
@@ -110,7 +116,10 @@ def load_decoder_factory(
         return factory, info
 
     if decoder_name == "ILP":
-        factory = make_ilp_decoder_factory(dem_path, decoder_options)
+        factory = make_ilp_decoder_factory(
+            dem_path, decoder_options,
+            use_edge_matrices=use_edge_matrices,
+        )
         info = DecoderConfigInfo(
             decoder_name=decoder_name,
             metric_name=metric_name,

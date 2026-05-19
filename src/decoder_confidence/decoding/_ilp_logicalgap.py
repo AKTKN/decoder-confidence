@@ -7,11 +7,14 @@ from typing import Any, Mapping
 import numpy as np
 import stim
 
-from beliefmatching import detector_error_model_to_check_matrices
 from ilp_decoder import DecoderConfig, ILPDecoder
 from ilp_decoder.core import DecoderDependencies
 
 from decoder_confidence.config import DecodingResult
+from decoder_confidence.decoding._decoder_adapter import (
+    _clip_priors,
+    _dem_to_matrices_with_edge_priors,
+)
 from decoder_confidence.execution.models import DecoderBase, DecoderFactory
 
 
@@ -49,11 +52,6 @@ class _ILPLogicalGapDecoder(DecoderBase):
             predictions=predictions,
             metrics={"logical_gap": logical_gap},
         )
-
-
-def _clip_priors(priors: Any) -> np.ndarray:
-    eps = 1e-14
-    return np.clip(np.asarray(priors, dtype=float), eps, 1.0 - eps)
 
 
 def _build_decoder_config(options: Mapping[str, Any]) -> DecoderConfig:
@@ -97,18 +95,22 @@ def _build_gurobi_env(log_to_console: bool):
 class _ILPDecoderFactory:
     dem_path: Path
     decoder_options: Mapping[str, Any]
+    use_edge_matrices: bool = False
 
     def __call__(self, dem: stim.DetectorErrorModel | None = None) -> _ILPLogicalGapDecoder:
         config = _build_decoder_config(self.decoder_options)
         if dem is None:
             dem = stim.DetectorErrorModel.from_file(str(self.dem_path))
 
-        mats = detector_error_model_to_check_matrices(
-            dem, allow_undecomposed_hyperedges=True
-        )
-        parity_check_matrix = mats.check_matrix
-        observables = mats.edge_observables_matrix
-        priors = _clip_priors(mats.priors)
+        matrices = _dem_to_matrices_with_edge_priors(dem, allow_undecomposed_hyperedges=True)
+        if self.use_edge_matrices:
+            parity_check_matrix = matrices.edge_check_matrix
+            observables = matrices.edge_observables_matrix
+            priors = _clip_priors(matrices.edge_priors)
+        else:
+            parity_check_matrix = matrices.check_matrix
+            observables = matrices.observables_matrix
+            priors = _clip_priors(matrices.priors)
 
         env = _build_gurobi_env(config.log_to_console)
         deps = DecoderDependencies(env=env)
@@ -125,6 +127,11 @@ class _ILPDecoderFactory:
 def make_ilp_decoder_factory(
     dem_path: Path,
     decoder_options: Mapping[str, Any],
+    use_edge_matrices: bool = False,
 ) -> DecoderFactory:
     # Use a top-level callable to keep the factory picklable for multiprocessing spawn.
-    return _ILPDecoderFactory(dem_path=dem_path, decoder_options=dict(decoder_options))
+    return _ILPDecoderFactory(
+        dem_path=dem_path,
+        decoder_options=dict(decoder_options),
+        use_edge_matrices=use_edge_matrices,
+    )

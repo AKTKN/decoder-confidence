@@ -111,6 +111,7 @@ class _ClusterLlrFactory:
     dem_path: Path
     decoder_options: Mapping[str, Any]
     alpha: float
+    use_edge_matrices: bool = False
 
     def __call__(
         self, dem: stim.DetectorErrorModel | None = None
@@ -121,7 +122,14 @@ class _ClusterLlrFactory:
         matrices = _dem_to_matrices_with_edge_priors(
             dem, allow_undecomposed_hyperedges=True
         )
-        priors = _clip_priors(matrices.priors)
+        if self.use_edge_matrices:
+            check_mat = matrices.edge_check_matrix
+            obs_mat = matrices.edge_observables_matrix
+            priors = _clip_priors(matrices.edge_priors)
+        else:
+            check_mat = matrices.check_matrix
+            obs_mat = matrices.observables_matrix
+            priors = _clip_priors(matrices.priors)
 
         # Prior LLR: w_e = log((1 - p_e) / p_e)
         # p_e = 0 yields inf (zero-probability mechanism) → treated as max confidence
@@ -137,14 +145,12 @@ class _ClusterLlrFactory:
         options["always_run_lsd"] = True
         options.setdefault("input_vector_type", "syndrome")
 
-        bplsd = BpLsdDecoder(
-            matrices.check_matrix, error_channel=list(priors), **options
-        )
+        bplsd = BpLsdDecoder(check_mat, error_channel=list(priors), **options)
         bplsd.set_do_stats(True)
 
         return ClusterLlrDecoder(
             _decoder=bplsd,
-            _observables=matrices.observables_matrix,
+            _observables=obs_mat,
             _w_e=w_e,
             _alpha=self.alpha,
         )
@@ -154,6 +160,7 @@ def make_cluster_llr_factory(
     dem_path: Path,
     decoder_options: Mapping[str, Any],
     metric_options: Mapping[str, Any],
+    use_edge_matrices: bool = False,
 ) -> DecoderFactory:
     alpha_raw = metric_options.get("alpha", 2.0)
     alpha = float(alpha_raw) if str(alpha_raw).lower() != "inf" else np.inf
@@ -163,4 +170,5 @@ def make_cluster_llr_factory(
         dem_path=dem_path,
         decoder_options=dict(decoder_options),
         alpha=alpha,
+        use_edge_matrices=use_edge_matrices,
     )

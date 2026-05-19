@@ -161,12 +161,15 @@ def _parse_circuit_stem(stem: str) -> dict[str, Any] | None:
 		"rounds": rounds_value,
 		"noisemodel": values["noisemodel"],
 		"p": p_value,
+		"use_both": values.get("use_both"),  # "True"/"False" for BB code, None otherwise
 	}
 
 
 def find_circuit_file(circuits_dir: Path, config: SamplingConfig) -> Path:
 	if not circuits_dir.exists():
 		raise FileNotFoundError(f"circuits directory not found: {circuits_dir}")
+
+	is_bb_code = "bivariate_bicycle" in config.code
 
 	matches: list[Path] = []
 	for path in circuits_dir.rglob("*.stim"):
@@ -183,13 +186,23 @@ def find_circuit_file(circuits_dir: Path, config: SamplingConfig) -> Path:
 			continue
 		if not math.isclose(parsed["p"], config.p, rel_tol=0.0, abs_tol=1e-12):
 			continue
+		# For BB code, match use_both against xyz_decoding flag.
+		# use_both=True  ↔ xyz_decoding=True  (all stabilizer bases included)
+		# use_both=False ↔ xyz_decoding=False (single-basis circuit pre-filtered)
+		if is_bb_code:
+			expected_use_both = "True" if config.xyz_decoding else "False"
+			if parsed.get("use_both") != expected_use_both:
+				continue
 		matches.append(path)
 
 	if not matches:
 		expected = (
 			f"code={config.code},d={config.d},rounds={config.rounds},"
-			f"noisemodel={config.noise_model},p={config.p}.stim"
+			f"noisemodel={config.noise_model},p={config.p}"
 		)
+		if is_bb_code:
+			expected += f",use_both={'True' if config.xyz_decoding else 'False'}"
+		expected += ".stim"
 		raise FileNotFoundError(
 			"Circuit not found under circuits/. Expected a file named like: "
 			f"{expected}"
@@ -207,12 +220,12 @@ def load_circuit(circuit_path: Path) -> stim.Circuit:
 	return stim.Circuit.from_file(str(circuit_path))
 
 
-def generate_dem(circuit: stim.Circuit, dem_path: Path) -> bool:
+def generate_dem(circuit: stim.Circuit, dem_path: Path, *, decompose_errors: bool = False) -> bool:
 	if dem_path.exists():
 		return False
 
 	dem_path.parent.mkdir(parents=True, exist_ok=True)
-	dem = circuit.detector_error_model(decompose_errors=False)
+	dem = circuit.detector_error_model(decompose_errors=decompose_errors)
 	dem.to_file(str(dem_path))
 	return True
 

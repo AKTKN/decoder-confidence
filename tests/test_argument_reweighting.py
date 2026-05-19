@@ -41,6 +41,10 @@ class _DummyAdapter(DecoderAdapter):
         return self._priors
 
     @property
+    def check_matrix(self) -> Any:
+        return np.eye(self.num_errors, dtype=int)
+
+    @property
     def observables_matrix(self) -> Any:
         return self._observables
 
