@@ -3,36 +3,54 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import stim
+
 from decoder_confidence.config import compute_batch_sizes, parse_args
 from decoder_confidence.sampling.dem import (
     build_metadata,
+    filter_dem_by_basis,
     find_circuit_file,
     generate_dem,
     load_circuit,
     resolve_output_layout,
     write_metadata,
 )
-from decoder_confidence.sampling.sampler import sample_batches
+from decoder_confidence.sampling.sampler import sample_batches_from_dem
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _dem_decompose_errors(code: str, xyz_decoding: bool) -> bool:
-    """Return True if the DEM should be generated with decompose_errors=True.
+def _needs_dem_filter(code: str, xyz_decoding: bool) -> bool:
+    """Return True if the DEM should be filtered to a single stabiliser basis.
 
-    surface_code with xyz_decoding=False: use decompose_errors=True so that
-    all errors are represented as graph edges (≤2-detector components).
-    This lets the decoder work with edge matrices and avoids the 0-detector
-    logical-error artefact introduced by basis filtering.
+    Applies to surface_code and superdense_color_code when xyz_decoding=False.
+    bivariate_bicycle_code uses pre-built single-basis circuit files (use_both=False)
+    so no filtering is needed.
     """
-    if code.startswith("surface_code") and not xyz_decoding:
+    if xyz_decoding:
+        return False
+    if code.startswith("surface_code"):
         return True
-    # bivariate_bicycle_code: circuit is already pre-filtered when xyz_decoding=False
-    #   (use_both=False in filename), so standard DEM generation is correct.
-    # superdense_color_code: not yet implemented (see comment below).
+    # superdense_color_code: filter_dem_by_basis supports it, but the full
+    # pipeline is not yet implemented.
+    # TODO: enable once superdense_color_code pipeline is complete.
+    # if code.startswith("superdense_color_code"):
+    #     return True
     return False
+
+
+def _get_remove_basis(code: str) -> str:
+    """Determine which detector basis to remove for a single-basis decoding run."""
+    if code.endswith("_Z"):
+        return "X"   # Z-memory: keep Z stabiliser detectors, remove X detectors
+    if code.endswith("_X"):
+        return "Z"   # X-memory: keep X stabiliser detectors, remove Z detectors
+    raise ValueError(
+        f"Cannot infer remove_basis from code name {code!r}. "
+        "Expected code name ending in '_Z' or '_X'."
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,41 +62,50 @@ def main(argv: list[str] | None = None) -> int:
         circuit_path = find_circuit_file(circuits_dir, config)
         circuit = load_circuit(circuit_path)
 
-        # --- Basis filtering has been removed entirely. ---
-        # Previously filter_detectors_by_basis was applied here for xyz_decoding=False.
-        # This was found to create 0-detector logical-error artefacts for si1000 and
-        # other noise models with correlated X/Z errors.  Each code now handles its
-        # own detector structure:
-        #
-        #   surface_code (xyz_decoding=False):
-        #       Use the full circuit, generate DEM with decompose_errors=True.
-        #       Step-3 decoding uses edge matrices (edge_check_matrix etc.).
-        #
-        #   bivariate_bicycle_code (xyz_decoding=False):
-        #       The circuit file already has use_both=False in its name; it was
-        #       pre-built with only the relevant stabilizer basis.  Sample as-is.
-        #
-        #   superdense_color_code: NOT YET IMPLEMENTED.
-        #       # TODO: implement superdense_color_code sampling support.
-
         layout = resolve_output_layout(
             Path(config.out_dir), circuit_path.stem, config.xyz_decoding
         )
         layout.root_dir.mkdir(parents=True, exist_ok=True)
         layout.sampled_data_dir.mkdir(parents=True, exist_ok=True)
 
-        decompose = _dem_decompose_errors(config.code, config.xyz_decoding)
-        generate_dem(circuit, layout.dem_path, decompose_errors=decompose)
         batch_sizes = compute_batch_sizes(config.num_shots, config.num_batch)
         metadata = build_metadata(config, circuit_path, layout, batch_sizes)
         write_metadata(layout.metadata_path, metadata)
 
-        sample_batches(
-            circuit,
+        # --- Step 1: build and save the DEM -----------------------------------
+        if _needs_dem_filter(config.code, config.xyz_decoding):
+            # surface_code (or future superdense_color_code) with xyz_decoding=False:
+            # generate a full DEM then filter to the relevant stabiliser basis.
+            full_dem = circuit.detector_error_model(decompose_errors=False)
+            if not layout.dem_path.exists():
+                filtered_dem = filter_dem_by_basis(full_dem, _get_remove_basis(config.code))
+                layout.dem_path.parent.mkdir(parents=True, exist_ok=True)
+                filtered_dem.to_file(str(layout.dem_path))
+        else:
+            # All other cases (xyz_decoding=True for any code, or
+            # bivariate_bicycle_code xyz_decoding=False with pre-built circuit):
+            # generate a standard full DEM.
+            #
+            # bivariate_bicycle_code with xyz_decoding=False uses a pre-built
+            # circuit (use_both=False in filename) that already contains only the
+            # relevant basis — no DEM-level filtering needed.
+            #
+            # superdense_color_code: NOT YET IMPLEMENTED.
+            # TODO: implement superdense_color_code sampling support.
+            generate_dem(circuit, layout.dem_path)
+
+        # --- Step 2: sample from the saved DEM --------------------------------
+        # Unified for all cases: load the DEM (filtered or full) and sample
+        # directly from it via CompiledDemSampler.  This ensures the syndrome
+        # data is always consistent with the DEM that step-3 decoding will use.
+        dem_for_sampling = stim.DetectorErrorModel.from_file(str(layout.dem_path))
+        sample_batches_from_dem(
+            dem_for_sampling,
             layout.sampled_data_dir,
             batch_sizes,
             config.det_sample_seed,
         )
+
     except (FileNotFoundError, FileExistsError, ValueError) as exc:
         logging.error(str(exc))
         return 2

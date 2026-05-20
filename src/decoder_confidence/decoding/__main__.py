@@ -262,17 +262,8 @@ def main(argv: list[str] | None = None) -> int:
     if not dets_path.exists():
         raise FileNotFoundError(f"Batch file not found: {dets_path}")
 
-    # Use edge matrices when decoding surface_code with xyz_decoding=False.
-    # The DEM was generated with decompose_errors=True in that case, so edge
-    # components are the meaningful unit for decoding.
-    parsed_dir = _parse_dir_name(circuit_dir.name)
-    code_name = parsed_dir["code"] if parsed_dir else ""
-    use_edge_matrices = code_name.startswith("surface_code") and not args.xyz
-
     decoder_config_path = Path(args.decoder_config)
-    decoder_factory, decoder_info = load_decoder_factory(
-        decoder_config_path, dem_path, use_edge_matrices=use_edge_matrices
-    )
+    decoder_factory, decoder_info = load_decoder_factory(decoder_config_path, dem_path)
 
     if decoder_info.decoder_name == "ILP":
         num_threads = int(decoder_info.decoder_options.get("threads") or 1)

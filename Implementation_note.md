@@ -64,3 +64,6 @@ detector(-0.5, 1.5, 0, 3) D0
 今は、step2で想定している量子回路が、両方のbasisのdetectorか、片方のbasisのdetectorのみなのか、ばらばら。統一して、常に、inputとしては、両方のdetectorを含むようにcircuit-generatorの方を修正する。
 
 また、filter_by_basis関数は何らかのバグ。
+
+↑
+Probably, the reason of this is comes from the two qubit gate set(CZ). We need to add H before and after CZ for each syndrome masurement, 

@@ -95,7 +95,6 @@ def _build_gurobi_env(log_to_console: bool):
 class _ILPDecoderFactory:
     dem_path: Path
     decoder_options: Mapping[str, Any]
-    use_edge_matrices: bool = False
 
     def __call__(self, dem: stim.DetectorErrorModel | None = None) -> _ILPLogicalGapDecoder:
         config = _build_decoder_config(self.decoder_options)
@@ -103,20 +102,13 @@ class _ILPDecoderFactory:
             dem = stim.DetectorErrorModel.from_file(str(self.dem_path))
 
         matrices = _dem_to_matrices_with_edge_priors(dem, allow_undecomposed_hyperedges=True)
-        if self.use_edge_matrices:
-            parity_check_matrix = matrices.edge_check_matrix
-            observables = matrices.edge_observables_matrix
-            priors = _clip_priors(matrices.edge_priors)
-        else:
-            parity_check_matrix = matrices.check_matrix
-            observables = matrices.observables_matrix
-            priors = _clip_priors(matrices.priors)
+        priors = _clip_priors(matrices.priors)
 
         env = _build_gurobi_env(config.log_to_console)
         deps = DecoderDependencies(env=env)
         decoder = ILPDecoder(
-            parity_check_matrix=parity_check_matrix,
-            observables=observables,
+            parity_check_matrix=matrices.check_matrix,
+            observables=matrices.observables_matrix,
             prior=priors,
             config=config,
             deps=deps,
@@ -127,11 +119,9 @@ class _ILPDecoderFactory:
 def make_ilp_decoder_factory(
     dem_path: Path,
     decoder_options: Mapping[str, Any],
-    use_edge_matrices: bool = False,
 ) -> DecoderFactory:
     # Use a top-level callable to keep the factory picklable for multiprocessing spawn.
     return _ILPDecoderFactory(
         dem_path=dem_path,
         decoder_options=dict(decoder_options),
-        use_edge_matrices=use_edge_matrices,
     )
