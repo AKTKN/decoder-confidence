@@ -15,7 +15,7 @@ from decoder_confidence.decoding._decoder_adapter import (
     _clip_priors,
     _dem_to_matrices_with_edge_priors,
 )
-from decoder_confidence.execution.models import DecoderBase, DecoderFactory
+from decoder_confidence.execution.models import DecoderBase, SharedEnvDecoderFactory
 
 
 @dataclass
@@ -79,47 +79,70 @@ def _build_decoder_config(options: Mapping[str, Any]) -> DecoderConfig:
     )
 
 
-def _build_gurobi_env(log_to_console: bool):
+def _build_ilp_env(log_to_console: bool):
+    """Create and start a Gurobi env configured for long-running simulations.
+
+    WLSTokenDuration=60 and WLSTokenRefresh=0.5 ensure the token is
+    automatically renewed every 30 min for the lifetime of the process.
+    """
     try:
         import gurobipy as gp
-    except ImportError as exc:  # pragma: no cover - optional dependency
+    except ImportError as exc:  # pragma: no cover
         raise RuntimeError("gurobipy is required for ILP decoder") from exc
 
     env = gp.Env(empty=True)
     env.setParam("OutputFlag", 1 if log_to_console else 0)
+    env.setParam("WLSTokenDuration", 60)
+    env.setParam("WLSTokenRefresh", 0.5)
     env.start()
     return env
 
 
+def _build_ilp_decoder_with_env(
+    env: Any, dem: stim.DetectorErrorModel, config: DecoderConfig
+) -> _ILPLogicalGapDecoder:
+    matrices = _dem_to_matrices_with_edge_priors(dem, allow_undecomposed_hyperedges=True)
+    priors = _clip_priors(matrices.priors)
+    deps = DecoderDependencies(env=env)
+    decoder = ILPDecoder(
+        parity_check_matrix=matrices.check_matrix,
+        observables=matrices.observables_matrix,
+        prior=priors,
+        config=config,
+        deps=deps,
+    )
+    return _ILPLogicalGapDecoder(decoder=decoder)
+
+
 @dataclass(frozen=True)
-class _ILPDecoderFactory:
+class _ILPDecoderFactory(SharedEnvDecoderFactory):
+    """Factory for ILP-based logical-gap decoder.
+
+    Extends SharedEnvDecoderFactory so the execution manager creates a single
+    Gurobi env (= 1 WLS session) and passes it to each worker thread.
+    """
+
     dem_path: Path
     decoder_options: Mapping[str, Any]
 
-    def __call__(self, dem: stim.DetectorErrorModel | None = None) -> _ILPLogicalGapDecoder:
+    def build_env(self) -> Any:
         config = _build_decoder_config(self.decoder_options)
+        return _build_ilp_env(config.log_to_console)
+
+    def build_decoder(self, env: Any, dem: stim.DetectorErrorModel) -> _ILPLogicalGapDecoder:
+        config = _build_decoder_config(self.decoder_options)
+        return _build_ilp_decoder_with_env(env, dem, config)
+
+    def __call__(self, dem: stim.DetectorErrorModel | None = None) -> _ILPLogicalGapDecoder:
         if dem is None:
             dem = stim.DetectorErrorModel.from_file(str(self.dem_path))
-
-        matrices = _dem_to_matrices_with_edge_priors(dem, allow_undecomposed_hyperedges=True)
-        priors = _clip_priors(matrices.priors)
-
-        env = _build_gurobi_env(config.log_to_console)
-        deps = DecoderDependencies(env=env)
-        decoder = ILPDecoder(
-            parity_check_matrix=matrices.check_matrix,
-            observables=matrices.observables_matrix,
-            prior=priors,
-            config=config,
-            deps=deps,
-        )
-        return _ILPLogicalGapDecoder(decoder=decoder)
+        return self.build_decoder(self.build_env(), dem)
 
 
 def make_ilp_decoder_factory(
     dem_path: Path,
     decoder_options: Mapping[str, Any],
-) -> DecoderFactory:
+) -> _ILPDecoderFactory:
     # Use a top-level callable to keep the factory picklable for multiprocessing spawn.
     return _ILPDecoderFactory(
         dem_path=dem_path,
