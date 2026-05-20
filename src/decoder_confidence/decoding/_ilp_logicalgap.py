@@ -82,7 +82,7 @@ def _build_decoder_config(options: Mapping[str, Any]) -> DecoderConfig:
 def _build_ilp_env(log_to_console: bool):
     """Create and start a Gurobi env configured for long-running simulations.
 
-    WLSTokenDuration=60 and WLSTokenRefresh=0.5 ensure the token is
+    WLSTokenDuration=30 and WLSTokenRefresh=0.5 ensure the token is
     automatically renewed every 30 min for the lifetime of the process.
     """
     try:
@@ -92,7 +92,7 @@ def _build_ilp_env(log_to_console: bool):
 
     env = gp.Env(empty=True)
     env.setParam("OutputFlag", 1 if log_to_console else 0)
-    env.setParam("WLSTokenDuration", 60)
+    env.setParam("WLSTokenDuration", 20)
     env.setParam("WLSTokenRefresh", 0.5)
     env.start()
     return env
