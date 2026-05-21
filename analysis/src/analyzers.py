@@ -17,13 +17,20 @@ ConditionalLERAnalyzer
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
 import matplotlib.pyplot as plt
 import polars as pl
 
-from analysis.src.config import ConditionalLERConfig, PlotConfig
+from analysis.src.config import (
+    CONDITIONAL_LER_SUPPORTED_METRICS,
+    ConditionalLERConfig,
+    PlotConfig,
+    normalize_metric_names,
+)
+from analysis.src.data_manager import SimulationDataManager
 from analysis.src.confidence import (
     BinnedProportions,
     bin_density,
@@ -91,6 +98,79 @@ def _normalize_bins(bins: Any) -> int | None:
     raise ValueError("bins must be a positive integer or None")
 
 
+def _normalize_per_round(per_round: Any) -> int | None:
+    if per_round is None:
+        return None
+    if isinstance(per_round, bool):
+        raise ValueError("per_round must be an integer >= 1 or None")
+    if isinstance(per_round, int) and per_round >= 1:
+        return per_round
+    raise ValueError("per_round must be an integer >= 1 or None")
+
+
+def _logical_error_rate_from_lf(
+    lf: pl.LazyFrame,
+    per_round: int | None,
+    return_num_shots: bool,
+) -> float | tuple[float, int]:
+    col = pl.col("is_logical_error").cast(pl.Int64)
+    stats = lf.select(
+        col.sum().alias("n_err"),
+        pl.len().alias("n_total"),
+    ).collect()
+    if stats.height == 0:
+        n_err = 0
+        n_total = 0
+    else:
+        raw_err = stats["n_err"][0]
+        raw_total = stats["n_total"][0]
+        n_err = 0 if raw_err is None else int(raw_err)
+        n_total = 0 if raw_total is None else int(raw_total)
+
+    ler = (n_err / n_total) if n_total > 0 else 0.0
+    if per_round is not None:
+        ler /= per_round
+
+    if return_num_shots:
+        return ler, n_total
+    return ler
+
+
+def _metric_style_map(metric_names: list[str], ax: plt.Axes) -> dict[str, dict[str, Any]]:
+    colors = plt.rcParams.get("axes.prop_cycle", None)
+    if colors is not None:
+        palette = colors.by_key().get("color", [])
+    else:
+        palette = []
+    if not palette:
+        palette = [f"C{i}" for i in range(10)]
+
+    markers = ["o", "s", "^", "D", "v", ">", "<", "P", "X", "*"]
+
+    style_map: dict[str, dict[str, Any]] = {}
+    for i, metric in enumerate(metric_names):
+        style_map[metric] = {
+            "color": palette[i % len(palette)],
+            "marker": markers[i % len(markers)],
+        }
+    return style_map
+
+
+def _metric_label(metric_name: str, label: str | None) -> str:
+    if label:
+        return f"{metric_name} | {label}"
+    return metric_name
+
+
+def _validate_conditional_metric(metric_name: str) -> None:
+    if metric_name not in CONDITIONAL_LER_SUPPORTED_METRICS:
+        supported = ", ".join(sorted(CONDITIONAL_LER_SUPPORTED_METRICS))
+        raise ValueError(
+            f"metric_name '{metric_name}' is not supported for conditional LER. "
+            f"Supported metrics: {supported}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Abstract base class
 # ---------------------------------------------------------------------------
@@ -152,46 +232,96 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
         config: PlotConfig,
         ax: plt.Axes,
     ) -> None:
+        metric_names = normalize_metric_names(config.metric_name)
+        multi_metric = len(metric_names) > 1
         partition_keys = _effective_partition_keys(config)
-        df = _collect_for_plot(lf, config.metric_name, partition_keys)
 
         bins: int | None = _normalize_bins(config.plot_params.get("bins"))
         alpha_ci: float = config.plot_params.get("alpha_ci", 0.05)
         shade_alpha: float = config.plot_params.get("shade_alpha", 0.2)
         round_digits = _normalize_round_digits(config.plot_params.get("round_digits"))
         use_negative_gap = bool(config.plot_params.get("use_negative_gap", False))
-        scatter_kw = {k: v for k, v in config.plot_params.items()
-                      if k not in _INTERNAL_PLOT_PARAMS}
 
-        if use_negative_gap and config.metric_name not in {
-            "logical_gap",
-            "linearize_logicalgap",
-        }:
-            raise ValueError(
-                "use_negative_gap is only supported for logical_gap and "
-                "linearize_logicalgap"
-            )
-
-        if not partition_keys:
-            values = self._extract_values(
-                df, config.metric_name, round_digits, use_negative_gap
-            )
-            self._plot_group(ax, values, bins, alpha_ci, shade_alpha, scatter_kw)
-        else:
-            partitions: dict[tuple, pl.DataFrame] = df.partition_by(
-                partition_keys, as_dict=True
-            )
-            for key_vals in sorted(partitions):
-                values = self._extract_values(
-                    partitions[key_vals], config.metric_name, round_digits, use_negative_gap
+        if use_negative_gap:
+            invalid = [
+                name for name in metric_names
+                if name not in {"logical_gap", "linearize_logicalgap"}
+            ]
+            if invalid:
+                raise ValueError(
+                    "use_negative_gap is only supported for logical_gap and "
+                    "linearize_logicalgap"
                 )
-                label = _make_label(partition_keys, key_vals)
-                self._plot_group(ax, values, bins, alpha_ci, shade_alpha, scatter_kw,
-                                 label=label)
+
+        style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
+
+        for metric_name in metric_names:
+            df = _collect_for_plot(lf, metric_name, partition_keys)
+
+            scatter_kw = {k: v for k, v in config.plot_params.items()
+                          if k not in _INTERNAL_PLOT_PARAMS}
+            if multi_metric:
+                scatter_kw.pop("color", None)
+                scatter_kw.pop("c", None)
+                scatter_kw.pop("marker", None)
+                scatter_kw.update(style_map[metric_name])
+
+            if not partition_keys:
+                label = metric_name if multi_metric else None
+                values = self._extract_values(
+                    df, metric_name, round_digits, use_negative_gap
+                )
+                self._plot_group(
+                    ax, values, bins, alpha_ci, shade_alpha, scatter_kw, label=label
+                )
+            else:
+                partitions: dict[tuple, pl.DataFrame] = df.partition_by(
+                    partition_keys, as_dict=True
+                )
+                for key_vals in sorted(partitions):
+                    values = self._extract_values(
+                        partitions[key_vals], metric_name, round_digits, use_negative_gap
+                    )
+                    label = _make_label(partition_keys, key_vals)
+                    if multi_metric:
+                        label = _metric_label(metric_name, label)
+                    self._plot_group(
+                        ax, values, bins, alpha_ci, shade_alpha, scatter_kw, label=label
+                    )
+
+        if multi_metric and not partition_keys:
             ax.legend()
 
-        ax.set_xlabel(config.metric_name)
+        ax.set_xlabel(metric_names[0] if not multi_metric else "Metric value")
         ax.set_ylabel("Frequency")
+
+    def logical_error_rate(
+        self,
+        manager: SimulationDataManager,
+        config: PlotConfig,
+        per_round: int | None = None,
+        return_num_shots: bool = False,
+    ) -> float | tuple[float, int]:
+        """Return the logical error rate for data matching *config*.
+
+        Parameters
+        ----------
+        manager:
+            Simulation data manager used for loading parquet data.
+        config:
+            Plot configuration; only selection filters are used.
+        per_round:
+            If an integer >= 1, return LER per round (LER / per_round).
+        return_num_shots:
+            When True, also return the number of shots (denominator).
+        """
+        metric_names = normalize_metric_names(config.metric_name)
+        if len(metric_names) != 1:
+            raise ValueError("logical_error_rate supports a single metric_name only")
+
+        per_round = _normalize_per_round(per_round)
+        lf = manager.query(config)
+        return _logical_error_rate_from_lf(lf, per_round, return_num_shots)
 
     def list_unique_values(
         self,
@@ -212,10 +342,15 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
         list
             Sorted unique values of the metric column (nulls excluded).
         """
+        metric_names = normalize_metric_names(config.metric_name)
+        if len(metric_names) != 1:
+            raise ValueError("list_unique_values supports a single metric_name only")
+        metric_name = metric_names[0]
+
         round_digits = _normalize_round_digits(config.plot_params.get("round_digits"))
         use_negative_gap = bool(config.plot_params.get("use_negative_gap", False))
 
-        if use_negative_gap and config.metric_name not in {
+        if use_negative_gap and metric_name not in {
             "logical_gap",
             "linearize_logicalgap",
         }:
@@ -224,9 +359,9 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
                 "linearize_logicalgap"
             )
 
-        df = _collect_for_plot(lf, config.metric_name, [])
+        df = _collect_for_plot(lf, metric_name, [])
         values = self._extract_values(
-            df, config.metric_name, round_digits, use_negative_gap
+            df, metric_name, round_digits, use_negative_gap
         )
         if values.size == 0:
             return []
@@ -323,70 +458,124 @@ class BooleanMetricAnalyzer(AbstractMetricAnalyzer):
         config: PlotConfig,
         ax: plt.Axes,
     ) -> None:
+        metric_names = normalize_metric_names(config.metric_name)
+        multi_metric = len(metric_names) > 1
         partition_keys = _effective_partition_keys(config)
-        df = _collect_for_plot(lf, config.metric_name, partition_keys)
 
         alpha_ci: float = config.plot_params.get("alpha_ci", 0.05)
         errorbar_kw = {k: v for k, v in config.plot_params.items()
                        if k not in _INTERNAL_PLOT_PARAMS}
 
-        col = df[config.metric_name]
-        accept_series = col if col.dtype == pl.Boolean else (col > 0.5)
+        style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
 
-        if not partition_keys:
-            n = len(accept_series)
-            k = int(accept_series.sum())
-            rate = k / n if n > 0 else 0.0
-            ci_low, ci_high = (wilson_ci(k, n, alpha=alpha_ci) if n > 0
-                               else (0.0, 0.0))
-            ax.errorbar(
-                [0], [rate],
-                yerr=[[rate - float(ci_low)], [float(ci_high) - rate]],
-                fmt="o", capsize=5, **errorbar_kw,
+        for metric_name in metric_names:
+            df = _collect_for_plot(lf, metric_name, partition_keys)
+            local_kw = dict(errorbar_kw)
+
+            if multi_metric:
+                local_kw.pop("color", None)
+                local_kw.pop("c", None)
+                local_kw.pop("marker", None)
+                local_kw.pop("fmt", None)
+                style = style_map[metric_name]
+                local_kw["color"] = style["color"]
+                fmt = style["marker"]
+            else:
+                fmt = local_kw.pop("fmt", "o")
+
+            col = df[metric_name]
+            accept_series = col if col.dtype == pl.Boolean else (col > 0.5)
+
+            if not partition_keys:
+                n = len(accept_series)
+                k = int(accept_series.sum())
+                rate = k / n if n > 0 else 0.0
+                ci_low, ci_high = (wilson_ci(k, n, alpha=alpha_ci) if n > 0
+                                   else (0.0, 0.0))
+                label = metric_name if multi_metric else None
+                ax.errorbar(
+                    [0], [rate],
+                    yerr=[[rate - float(ci_low)], [float(ci_high) - rate]],
+                    fmt=fmt, capsize=5, label=label, **local_kw,
+                )
+                ax.set_xticks([0])
+                ax.set_xticklabels(["all"])
+                ax.set_ylabel("Accept rate")
+                ax.set_ylim(0, 1)
+                continue
+
+            partitions: dict[tuple, pl.DataFrame] = df.partition_by(
+                partition_keys, as_dict=True
             )
-            ax.set_xticks([0])
-            ax.set_xticklabels(["all"])
+
+            labels: list[str] = []
+            rates: list[float] = []
+            ci_lows: list[float] = []
+            ci_highs: list[float] = []
+
+            for key_vals in sorted(partitions):
+                part_col = partitions[key_vals][metric_name]
+                part_accept = part_col if part_col.dtype == pl.Boolean else (part_col > 0.5)
+                n = len(part_accept)
+                k = int(part_accept.sum())
+                rate = k / n if n > 0 else 0.0
+                ci_low, ci_high = (wilson_ci(k, n, alpha=alpha_ci) if n > 0
+                                   else (0.0, 0.0))
+
+                label = _make_label(partition_keys, key_vals)
+                if multi_metric:
+                    label = _metric_label(metric_name, label)
+
+                labels.append(label)
+                rates.append(rate)
+                ci_lows.append(float(ci_low))
+                ci_highs.append(float(ci_high))
+
+            x_arr = np.arange(len(labels), dtype=float)
+            rates_arr = np.array(rates)
+            low_arr = np.array(ci_lows)
+            high_arr = np.array(ci_highs)
+
+            ax.errorbar(
+                x_arr, rates_arr,
+                yerr=[rates_arr - low_arr, high_arr - rates_arr],
+                fmt=fmt, capsize=5, label=None, **local_kw,
+            )
+            ax.set_xticks(x_arr)
+            ax.set_xticklabels(labels, rotation=45, ha="right")
             ax.set_ylabel("Accept rate")
             ax.set_ylim(0, 1)
-            return
 
-        partitions: dict[tuple, pl.DataFrame] = df.partition_by(
-            partition_keys, as_dict=True
-        )
+        if multi_metric and not partition_keys:
+            ax.legend()
 
-        labels: list[str] = []
-        rates: list[float] = []
-        ci_lows: list[float] = []
-        ci_highs: list[float] = []
+    def logical_error_rate(
+        self,
+        manager: SimulationDataManager,
+        config: PlotConfig,
+        per_round: int | None = None,
+        return_num_shots: bool = False,
+    ) -> float | tuple[float, int]:
+        """Return the logical error rate for data matching *config*.
 
-        for key_vals in sorted(partitions):
-            part_col = partitions[key_vals][config.metric_name]
-            part_accept = part_col if part_col.dtype == pl.Boolean else (part_col > 0.5)
-            n = len(part_accept)
-            k = int(part_accept.sum())
-            rate = k / n if n > 0 else 0.0
-            ci_low, ci_high = (wilson_ci(k, n, alpha=alpha_ci) if n > 0
-                               else (0.0, 0.0))
+        Parameters
+        ----------
+        manager:
+            Simulation data manager used for loading parquet data.
+        config:
+            Plot configuration; only selection filters are used.
+        per_round:
+            If an integer >= 1, return LER per round (LER / per_round).
+        return_num_shots:
+            When True, also return the number of shots (denominator).
+        """
+        metric_names = normalize_metric_names(config.metric_name)
+        if len(metric_names) != 1:
+            raise ValueError("logical_error_rate supports a single metric_name only")
 
-            labels.append(_make_label(partition_keys, key_vals))
-            rates.append(rate)
-            ci_lows.append(float(ci_low))
-            ci_highs.append(float(ci_high))
-
-        x_arr = np.arange(len(labels), dtype=float)
-        rates_arr = np.array(rates)
-        low_arr = np.array(ci_lows)
-        high_arr = np.array(ci_highs)
-
-        ax.errorbar(
-            x_arr, rates_arr,
-            yerr=[rates_arr - low_arr, high_arr - rates_arr],
-            fmt="o", capsize=5, **errorbar_kw,
-        )
-        ax.set_xticks(x_arr)
-        ax.set_xticklabels(labels, rotation=45, ha="right")
-        ax.set_ylabel("Accept rate")
-        ax.set_ylim(0, 1)
+        per_round = _normalize_per_round(per_round)
+        lf = manager.query(config)
+        return _logical_error_rate_from_lf(lf, per_round, return_num_shots)
 
 
 # ---------------------------------------------------------------------------
@@ -435,21 +624,42 @@ class ConditionalLERAnalyzer:
         ax:
             Axes to draw on.
         """
-        df = self._collect(lf, config)
+        metric_names = normalize_metric_names(config.metric_name)
+        multi_metric = len(metric_names) > 1
+        style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
 
-        if not config.group_by:
-            self._plot_ler_group(ax, df, config)
-        else:
-            partitions: dict[tuple, pl.DataFrame] = df.partition_by(
-                config.group_by, as_dict=True
-            )
-            for key_vals in sorted(partitions):
-                label = _make_label(config.group_by, key_vals)
-                self._plot_ler_group(ax, partitions[key_vals], config, label=label)
+        for metric_name in metric_names:
+            _validate_conditional_metric(metric_name)
+            metric_config = replace(config, metric_name=metric_name)
+            df = self._collect(lf, metric_config)
+
+            style = style_map.get(metric_name)
+            if not metric_config.group_by:
+                label = metric_name if multi_metric else None
+                self._plot_ler_group(
+                    ax, df, metric_config, label=label, style=style
+                )
+            else:
+                partitions: dict[tuple, pl.DataFrame] = df.partition_by(
+                    metric_config.group_by, as_dict=True
+                )
+                for key_vals in sorted(partitions):
+                    label = _make_label(metric_config.group_by, key_vals)
+                    if multi_metric:
+                        label = _metric_label(metric_name, label)
+                    self._plot_ler_group(
+                        ax, partitions[key_vals], metric_config, label=label, style=style
+                    )
+
+        if config.group_by or multi_metric:
             ax.legend()
 
-        ax.set_xlabel(config.metric_name)
-        ax.set_ylabel(f"P(logical error | {config.metric_name})")
+        ax.set_xlabel(metric_names[0] if not multi_metric else "Metric value")
+        ax.set_ylabel(
+            f"P(logical error | {metric_names[0]})"
+            if not multi_metric
+            else "P(logical error | metric)"
+        )
 
     def plot_fitting(
         self,
@@ -473,20 +683,37 @@ class ConditionalLERAnalyzer:
         if not config.get_fitting_plot:
             return
 
-        df = self._collect(lf, config)
+        metric_names = normalize_metric_names(config.metric_name)
+        multi_metric = len(metric_names) > 1
+        style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
 
-        if not config.group_by:
-            self._plot_fitting_group(ax, df, config, label=None)
-        else:
-            partitions: dict[tuple, pl.DataFrame] = df.partition_by(
-                config.group_by, as_dict=True
-            )
-            for key_vals in sorted(partitions):
-                label = _make_label(config.group_by, key_vals)
-                self._plot_fitting_group(ax, partitions[key_vals], config, label=label)
+        for metric_name in metric_names:
+            _validate_conditional_metric(metric_name)
+            metric_config = replace(config, metric_name=metric_name)
+            df = self._collect(lf, metric_config)
+
+            style = style_map.get(metric_name)
+            if not metric_config.group_by:
+                label = metric_name if multi_metric else None
+                self._plot_fitting_group(
+                    ax, df, metric_config, label=label, style=style
+                )
+            else:
+                partitions: dict[tuple, pl.DataFrame] = df.partition_by(
+                    metric_config.group_by, as_dict=True
+                )
+                for key_vals in sorted(partitions):
+                    label = _make_label(metric_config.group_by, key_vals)
+                    if multi_metric:
+                        label = _metric_label(metric_name, label)
+                    self._plot_fitting_group(
+                        ax, partitions[key_vals], metric_config, label=label, style=style
+                    )
+
+        if config.group_by or multi_metric:
             ax.legend()
 
-        ax.set_xlabel(config.metric_name)
+        ax.set_xlabel(metric_names[0] if not multi_metric else "Metric value")
         ax.set_ylabel(r"$\log\!\left(\dfrac{1 - y}{y}\right)$")
 
     # ------------------------------------------------------------------
@@ -519,6 +746,7 @@ class ConditionalLERAnalyzer:
         df: pl.DataFrame,
         config: ConditionalLERConfig,
         label: str | None = None,
+        style: dict[str, Any] | None = None,
     ) -> None:
         x, y = self._metric_and_error(df, config)
         if x.size == 0:
@@ -527,9 +755,12 @@ class ConditionalLERAnalyzer:
         bstats = self._ler_stats(x, y, config)
         valid = ~np.isnan(bstats.proportions)
 
+        scatter_kw = {"s": 30}
+        if style:
+            scatter_kw.update(style)
         sc = ax.scatter(
             bstats.centers[valid], bstats.proportions[valid],
-            label=label, s=30,
+            label=label, **scatter_kw,
         )
         shade_ci(
             ax, bstats.centers, bstats.ci_low, bstats.ci_high,
@@ -542,6 +773,7 @@ class ConditionalLERAnalyzer:
         df: pl.DataFrame,
         config: ConditionalLERConfig,
         label: str | None = None,
+        style: dict[str, Any] | None = None,
     ) -> None:
         x, y = self._metric_and_error(df, config)
         if x.size == 0:
@@ -561,7 +793,10 @@ class ConditionalLERAnalyzer:
         k, l = np.polyfit(g, z, 1)
 
         data_label = f"data ({label})" if label else "data"
-        sc = ax.scatter(g, z, label=data_label, s=30)
+        scatter_kw = {"s": 30}
+        if style:
+            scatter_kw.update(style)
+        sc = ax.scatter(g, z, label=data_label, **scatter_kw)
         color = _scatter_color(sc)
 
         # Shade CI in z-space using Wilson CI on p

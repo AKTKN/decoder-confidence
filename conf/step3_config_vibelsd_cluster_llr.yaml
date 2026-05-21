@@ -1,0 +1,25 @@
+decoder: VIBE-LSD
+metric: cluster_llr
+
+decoder_options:
+  # Ensemble size L: number of BP instances with distinct serial schedules
+  ensemble_size: 32
+  # Correction limit M: ignored in cluster_llr mode (all L instances always run)
+  correction_limit: 5
+  # BP max iterations per instance
+  max_iter: 25
+  # BP variant: "minimum_sum" or "product_sum"
+  bp_method: minimum_sum
+  ms_scaling_factor: 1.0
+  # LSD order for the fallback decoder (0 = LSD-0, fastest)
+  lsd_order: 0
+  # Prior perturbation δ: each instance samples p̃_e ~ Uniform[(1-δ)p_e, (1+δ)p_e]
+  # Set to 0.0 to disable perturbation
+  prior_perturbation: 0.0
+  # RNG seed for permutation generation and perturbation sampling
+  seed: 0
+
+metric_options:
+  # Alpha-norm order for Q_LLR (see Definition 2 in Lee, English, Bartlett 2026)
+  # Use "inf" for the max-cluster variant
+  alpha: 2.0

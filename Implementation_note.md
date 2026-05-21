@@ -67,3 +67,7 @@ detector(-0.5, 1.5, 0, 3) D0
 
 ↑
 Probably, the reason of this is comes from the two qubit gate set(CZ). We need to add H before and after CZ for each syndrome masurement, 
+
+
+## cluster llr by vibeLSD
+One design note on cluster_llr: LsdDecoder in ldpc exposes no cluster statistics API. So the cluster_llr fallback uses BpLsdDecoder(max_iter=1, always_run_lsd=True) — averaged LLRs are converted to probabilities and fed as error_channel, one BP iteration runs (slightly modifying the soft info), then LSD runs and exposes cluster stats. This is the only practical option within ldpc's Python API.

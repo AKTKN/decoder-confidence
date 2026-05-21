@@ -517,4 +517,8 @@ def build_decoder_adapter(
     if normalized in {"MWPM", "PYMATCHING"}:
         return _build_mwpm_adapter(dem, decoder_options)
 
+    if normalized in {"VIBE-LSD", "VIBELSD"}:
+        from decoder_confidence.decoding._vibelsd import build_vibelsd_adapter
+        return build_vibelsd_adapter(dem, decoder_options)
+
     raise ValueError(f"Unsupported base decoder for AR: {decoder_name}")

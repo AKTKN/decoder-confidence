@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 import polars as pl
 
-from analysis.src.config import PlotConfig
+from analysis.src.config import PlotConfig, normalize_metric_names
 
 # Regex to extract the batch index from filenames like "metric=logical_gap_batch=5.parquet"
 # or "logicalerror_batch=5.parquet".
@@ -147,17 +147,24 @@ class SimulationDataManager:
             If no matching data is found for the given config.
         """
         frames: list[pl.LazyFrame] = []
+        metric_names = normalize_metric_names(config.metric_name)
 
-        for circuit_dir, circuit_params in self._iter_circuit_dirs(config.filters):
-            for dm_dir, dm_params in self._iter_decoder_dirs(circuit_dir, config):
-                all_params = {**circuit_params, **dm_params}
-                frames.extend(
-                    self._build_frames_for_dir(dm_dir, config, all_params)
-                )
+        for metric_name in metric_names:
+            for circuit_dir, circuit_params in self._iter_circuit_dirs(config.filters):
+                for dm_dir, dm_params in self._iter_decoder_dirs(
+                    circuit_dir, config, metric_name
+                ):
+                    all_params = {**circuit_params, **dm_params}
+                    frames.extend(
+                        self._build_frames_for_dir(
+                            dm_dir, config, all_params, metric_name
+                        )
+                    )
 
         if not frames:
+            metrics = ", ".join(metric_names)
             raise FileNotFoundError(
-                f"No parquet data found for metric='{config.metric_name}' "
+                f"No parquet data found for metric(s)='{metrics}' "
                 f"with filters={config.filters} under {self.result_dir_root}"
             )
 
@@ -182,7 +189,7 @@ class SimulationDataManager:
             yield entry, params
 
     def _iter_decoder_dirs(
-        self, circuit_dir: Path, config: PlotConfig
+        self, circuit_dir: Path, config: PlotConfig, metric_name: str
     ) -> Iterator[tuple[Path, dict[str, str]]]:
         """Yield ``(path, parsed_params)`` for each matching decoder/metric directory."""
         decoding_dir = circuit_dir / "decoding_result"
@@ -195,7 +202,7 @@ class SimulationDataManager:
             params = _parse_kv(entry.name)
 
             # Must match the requested metric name
-            if _strip_quotes(params.get("metric", "")) != config.metric_name:
+            if _strip_quotes(params.get("metric", "")) != metric_name:
                 continue
 
             # Must match one of the requested decoders (if specified)
@@ -210,11 +217,12 @@ class SimulationDataManager:
         dm_dir: Path,
         config: PlotConfig,
         all_params: dict[str, str],
+        metric_name: str,
     ) -> list[pl.LazyFrame]:
         """Return one LazyFrame per batch file found in *dm_dir*."""
         frames: list[pl.LazyFrame] = []
 
-        for metric_file in sorted(dm_dir.glob(f"metric={config.metric_name}_batch=*.parquet")):
+        for metric_file in sorted(dm_dir.glob(f"metric={metric_name}_batch=*.parquet")):
             batch_idx = _extract_batch_idx(metric_file.name)
             if batch_idx is None:
                 continue

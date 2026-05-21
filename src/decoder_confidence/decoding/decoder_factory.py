@@ -93,10 +93,24 @@ def load_decoder_factory(
         )
         return factory, info
 
+    if metric_name == "cluster_llr" and decoder_name in {"VIBE-LSD", "VIBELSD"}:
+        from decoder_confidence.decoding._vibelsd import make_vibelsd_cluster_llr_factory
+
+        factory = make_vibelsd_cluster_llr_factory(dem_path, decoder_options, metric_options)
+        info = DecoderConfigInfo(
+            decoder_name=decoder_name,
+            metric_name=metric_name,
+            decoder_options=dict(decoder_options),
+            metric_options=dict(metric_options),
+            config_path=config_path,
+            raw_config=dict(config),
+        )
+        return factory, info
+
     if metric_name == "cluster_llr":
         if decoder_name not in {"BP-LSD", "BPLSD"}:
             raise ValueError(
-                f"cluster_llr metric requires decoder: BP-LSD, got {decoder_name}"
+                f"cluster_llr metric requires decoder: BP-LSD or VIBE-LSD, got {decoder_name}"
             )
         factory = make_cluster_llr_factory(dem_path, decoder_options, metric_options)
         info = DecoderConfigInfo(
@@ -111,6 +125,20 @@ def load_decoder_factory(
 
     if decoder_name == "ILP":
         factory = make_ilp_decoder_factory(dem_path, decoder_options)
+        info = DecoderConfigInfo(
+            decoder_name=decoder_name,
+            metric_name=metric_name,
+            decoder_options=dict(decoder_options),
+            metric_options=dict(metric_options),
+            config_path=config_path,
+            raw_config=dict(config),
+        )
+        return factory, info
+
+    if decoder_name in {"VIBE-LSD", "VIBELSD"}:
+        from decoder_confidence.decoding._vibelsd import make_vibelsd_factory
+
+        factory = make_vibelsd_factory(dem_path, decoder_options)
         info = DecoderConfigInfo(
             decoder_name=decoder_name,
             metric_name=metric_name,

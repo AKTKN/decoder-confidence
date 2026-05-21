@@ -9,6 +9,23 @@ CONDITIONAL_LER_SUPPORTED_METRICS: frozenset[str] = frozenset(
 )
 
 
+def normalize_metric_names(metric_name: str | List[str]) -> List[str]:
+    """Return a normalized list of metric names.
+
+    ``metric_name`` can be a single string or a list of strings. The returned
+    list preserves the given order.
+    """
+    if isinstance(metric_name, str):
+        return [metric_name]
+    if isinstance(metric_name, list):
+        if not metric_name:
+            raise ValueError("metric_name list must be non-empty")
+        if not all(isinstance(name, str) for name in metric_name):
+            raise ValueError("metric_name list must contain only strings")
+        return metric_name
+    raise ValueError("metric_name must be a string or list of strings")
+
+
 @dataclass
 class PlotConfig:
     """Encapsulates all configuration for a metric distribution plot.
@@ -16,7 +33,8 @@ class PlotConfig:
     Parameters
     ----------
     metric_name:
-        Name of the metric column to analyse (e.g. ``"logical_gap"``, ``"ar-lec"``).
+        Name of the metric column to analyse (e.g. ``"logical_gap"``, ``"ar-lec"``)
+        or a list of metric names to overlay on the same axes.
     decoder_names:
         Subset of decoder names to include. ``None`` includes every decoder found on
         disk for the requested metric.
@@ -41,7 +59,7 @@ class PlotConfig:
         ``batch=N`` suffix in parquet filenames). ``None`` loads all available batches.
     """
 
-    metric_name: str
+    metric_name: str | List[str]
     decoder_names: Optional[List[str]] = None
     filters: Dict[str, Any] = field(default_factory=dict)
     group_by: List[str] = field(default_factory=list)
@@ -59,8 +77,8 @@ class ConditionalLERConfig:
     ----------
     metric_name:
         Continuous metric used as the x-axis (e.g. ``"logical_gap"``,
-        ``"linearize_logicalgap"``).  Must be one of
-        :data:`CONDITIONAL_LER_SUPPORTED_METRICS`.
+        ``"linearize_logicalgap"``). May be a list to overlay multiple metrics.
+        Each metric must be one of :data:`CONDITIONAL_LER_SUPPORTED_METRICS`.
     decoder_names:
         Subset of decoder names to include. ``None`` includes every decoder.
     filters:
@@ -83,7 +101,7 @@ class ConditionalLERConfig:
         values unchanged.
     """
 
-    metric_name: str
+    metric_name: str | List[str]
     decoder_names: Optional[List[str]] = None
     filters: Dict[str, Any] = field(default_factory=dict)
     group_by: List[str] = field(default_factory=list)
