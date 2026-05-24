@@ -51,12 +51,24 @@ class PlotConfig:
         keys so that shots with and without logical errors are plotted separately.
     plot_params:
         Keyword arguments forwarded verbatim to the underlying matplotlib primitive
-        (e.g. ``{"bins": 50, "alpha": 0.7}``).
+        (e.g. ``{"bins": 50, "alpha": 0.7}``).  Special keys consumed internally:
+        ``"bins"``, ``"alpha_ci"``, ``"shade_alpha"``, ``"round_digits"``,
+        ``"use_negative_gap"``, ``"convert_db"``.
     extra_options:
         Reserved for future extensibility (e.g. conditional LER, post-selection).
     batch_indices:
         Restrict loading to specific batch indices (1-based integers matching the
         ``batch=N`` suffix in parquet filenames). ``None`` loads all available batches.
+    metric_labels:
+        Mapping from internal metric name to a human-readable display label used in
+        legend entries and axis labels (e.g. ``{"linearize_logicalgap": "BP+OSD"}``).
+        Metric names absent from the mapping fall back to the raw name.
+    xlabel:
+        Override for the x-axis label.  When ``None`` (default) the label is derived
+        automatically from the metric name / ``metric_labels``.
+    ylabel:
+        Override for the y-axis label.  When ``None`` (default) the label is
+        ``"Frequency"``.
     """
 
     metric_name: str | List[str]
@@ -67,6 +79,9 @@ class PlotConfig:
     plot_params: Dict[str, Any] = field(default_factory=dict)
     extra_options: Dict[str, Any] = field(default_factory=dict)
     batch_indices: Optional[List[int]] = None
+    metric_labels: Dict[str, str] = field(default_factory=dict)
+    xlabel: Optional[str] = None
+    ylabel: Optional[str] = None
 
 
 @dataclass
@@ -99,6 +114,19 @@ class ConditionalLERConfig:
     round_digits:
         Decimal digits to round metric values before analysis. ``None`` leaves
         values unchanged.
+    convert_db:
+        When ``True``, convert gap metric values to decibels before binning,
+        rounding, and plotting: ``gap_dB = (10 / ln(10)) * gap``.
+        Only valid for ``"logical_gap"`` and ``"linearize_logicalgap"``.
+    metric_labels:
+        Mapping from internal metric name to a human-readable display label used in
+        legend entries and axis labels (e.g. ``{"logical_gap": "BP decoder"}``).
+        Metric names absent from the mapping fall back to the raw name.
+    xlabel:
+        Override for the x-axis label.  When ``None`` the label is derived
+        automatically from the metric name / ``metric_labels``.
+    ylabel:
+        Override for the y-axis label.  When ``None`` the default label is used.
     """
 
     metric_name: str | List[str]
@@ -110,3 +138,7 @@ class ConditionalLERConfig:
     get_fitting_plot: bool = False
     batch_indices: Optional[List[int]] = None
     round_digits: Optional[int] = None
+    convert_db: bool = False
+    metric_labels: Dict[str, str] = field(default_factory=dict)
+    xlabel: Optional[str] = None
+    ylabel: Optional[str] = None

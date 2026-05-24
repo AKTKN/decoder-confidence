@@ -41,8 +41,14 @@ from analysis.src.confidence import (
 
 # plot_params keys consumed internally; not forwarded to matplotlib primitives.
 _INTERNAL_PLOT_PARAMS = frozenset(
-    {"bins", "alpha_ci", "shade_alpha", "round_digits", "use_negative_gap"}
+    {"bins", "alpha_ci", "shade_alpha", "round_digits", "use_negative_gap", "convert_db"}
 )
+
+# Metrics for which gap → dB conversion is meaningful.
+_GAP_METRICS = frozenset({"logical_gap", "linearize_logicalgap"})
+
+# Multiplicative factor for gap → dB: gap_dB = _DB_FACTOR * gap
+_DB_FACTOR: float = 10.0 / np.log(10.0)
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +151,7 @@ def _metric_style_map(metric_names: list[str], ax: plt.Axes) -> dict[str, dict[s
     if not palette:
         palette = [f"C{i}" for i in range(10)]
 
-    markers = ["o", "s", "^", "D", "v", ">", "<", "P", "X", "*"]
+    markers = ["o", "x", "^", "D", "v", ">", "<", "P", "X", "*"]
 
     style_map: dict[str, dict[str, Any]] = {}
     for i, metric in enumerate(metric_names):
@@ -241,15 +247,20 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
         shade_alpha: float = config.plot_params.get("shade_alpha", 0.2)
         round_digits = _normalize_round_digits(config.plot_params.get("round_digits"))
         use_negative_gap = bool(config.plot_params.get("use_negative_gap", False))
+        convert_db = bool(config.plot_params.get("convert_db", False))
 
         if use_negative_gap:
-            invalid = [
-                name for name in metric_names
-                if name not in {"logical_gap", "linearize_logicalgap"}
-            ]
+            invalid = [n for n in metric_names if n not in _GAP_METRICS]
             if invalid:
                 raise ValueError(
                     "use_negative_gap is only supported for logical_gap and "
+                    "linearize_logicalgap"
+                )
+        if convert_db:
+            invalid = [n for n in metric_names if n not in _GAP_METRICS]
+            if invalid:
+                raise ValueError(
+                    "convert_db is only supported for logical_gap and "
                     "linearize_logicalgap"
                 )
 
@@ -257,6 +268,7 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
 
         for metric_name in metric_names:
             df = _collect_for_plot(lf, metric_name, partition_keys)
+            display_name = config.metric_labels.get(metric_name, metric_name)
 
             scatter_kw = {k: v for k, v in config.plot_params.items()
                           if k not in _INTERNAL_PLOT_PARAMS}
@@ -267,9 +279,9 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
                 scatter_kw.update(style_map[metric_name])
 
             if not partition_keys:
-                label = metric_name if multi_metric else None
+                label = display_name if multi_metric else None
                 values = self._extract_values(
-                    df, metric_name, round_digits, use_negative_gap
+                    df, metric_name, round_digits, use_negative_gap, convert_db
                 )
                 self._plot_group(
                     ax, values, bins, alpha_ci, shade_alpha, scatter_kw, label=label
@@ -280,11 +292,12 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
                 )
                 for key_vals in sorted(partitions):
                     values = self._extract_values(
-                        partitions[key_vals], metric_name, round_digits, use_negative_gap
+                        partitions[key_vals], metric_name, round_digits,
+                        use_negative_gap, convert_db
                     )
                     label = _make_label(partition_keys, key_vals)
                     if multi_metric:
-                        label = _metric_label(metric_name, label)
+                        label = _metric_label(display_name, label)
                     self._plot_group(
                         ax, values, bins, alpha_ci, shade_alpha, scatter_kw, label=label
                     )
@@ -292,8 +305,14 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
         if multi_metric and not partition_keys:
             ax.legend()
 
-        ax.set_xlabel(metric_names[0] if not multi_metric else "Metric value")
-        ax.set_ylabel("Frequency")
+        if config.xlabel is not None:
+            ax.set_xlabel(config.xlabel)
+        else:
+            if not multi_metric:
+                ax.set_xlabel(config.metric_labels.get(metric_names[0], metric_names[0]))
+            else:
+                ax.set_xlabel("Metric value")
+        ax.set_ylabel(config.ylabel if config.ylabel is not None else "Frequency")
 
     def logical_error_rate(
         self,
@@ -349,19 +368,21 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
 
         round_digits = _normalize_round_digits(config.plot_params.get("round_digits"))
         use_negative_gap = bool(config.plot_params.get("use_negative_gap", False))
+        convert_db = bool(config.plot_params.get("convert_db", False))
 
-        if use_negative_gap and metric_name not in {
-            "logical_gap",
-            "linearize_logicalgap",
-        }:
+        if use_negative_gap and metric_name not in _GAP_METRICS:
             raise ValueError(
                 "use_negative_gap is only supported for logical_gap and "
                 "linearize_logicalgap"
             )
+        if convert_db and metric_name not in _GAP_METRICS:
+            raise ValueError(
+                "convert_db is only supported for logical_gap and linearize_logicalgap"
+            )
 
         df = _collect_for_plot(lf, metric_name, [])
         values = self._extract_values(
-            df, metric_name, round_digits, use_negative_gap
+            df, metric_name, round_digits, use_negative_gap, convert_db
         )
         if values.size == 0:
             return []
@@ -410,6 +431,7 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
         metric_name: str,
         round_digits: int | None,
         use_negative_gap: bool,
+        convert_db: bool = False,
     ) -> np.ndarray:
         if use_negative_gap:
             if "is_logical_error" not in df.columns:
@@ -426,6 +448,9 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
                 values[is_error] *= -1.0
         else:
             values = df[metric_name].drop_nulls().to_numpy().astype(float)
+
+        if convert_db:
+            values = _DB_FACTOR * values
 
         if round_digits is not None:
             values = np.round(values, decimals=round_digits)
@@ -632,10 +657,11 @@ class ConditionalLERAnalyzer:
             _validate_conditional_metric(metric_name)
             metric_config = replace(config, metric_name=metric_name)
             df = self._collect(lf, metric_config)
+            display_name = config.metric_labels.get(metric_name, metric_name)
 
             style = style_map.get(metric_name)
             if not metric_config.group_by:
-                label = metric_name if multi_metric else None
+                label = display_name if multi_metric else None
                 self._plot_ler_group(
                     ax, df, metric_config, label=label, style=style
                 )
@@ -646,7 +672,7 @@ class ConditionalLERAnalyzer:
                 for key_vals in sorted(partitions):
                     label = _make_label(metric_config.group_by, key_vals)
                     if multi_metric:
-                        label = _metric_label(metric_name, label)
+                        label = _metric_label(display_name, label)
                     self._plot_ler_group(
                         ax, partitions[key_vals], metric_config, label=label, style=style
                     )
@@ -654,12 +680,22 @@ class ConditionalLERAnalyzer:
         if config.group_by or multi_metric:
             ax.legend()
 
-        ax.set_xlabel(metric_names[0] if not multi_metric else "Metric value")
-        ax.set_ylabel(
-            f"P(logical error | {metric_names[0]})"
-            if not multi_metric
-            else "P(logical error | metric)"
-        )
+        if config.xlabel is not None:
+            ax.set_xlabel(config.xlabel)
+        else:
+            if not multi_metric:
+                ax.set_xlabel(config.metric_labels.get(metric_names[0], metric_names[0]))
+            else:
+                ax.set_xlabel("Metric value")
+
+        if config.ylabel is not None:
+            ax.set_ylabel(config.ylabel)
+        else:
+            if not multi_metric:
+                display0 = config.metric_labels.get(metric_names[0], metric_names[0])
+                ax.set_ylabel(f"P(logical error | {display0})")
+            else:
+                ax.set_ylabel("P(logical error | metric)")
 
     def plot_fitting(
         self,
@@ -691,10 +727,11 @@ class ConditionalLERAnalyzer:
             _validate_conditional_metric(metric_name)
             metric_config = replace(config, metric_name=metric_name)
             df = self._collect(lf, metric_config)
+            display_name = config.metric_labels.get(metric_name, metric_name)
 
             style = style_map.get(metric_name)
             if not metric_config.group_by:
-                label = metric_name if multi_metric else None
+                label = display_name if multi_metric else None
                 self._plot_fitting_group(
                     ax, df, metric_config, label=label, style=style
                 )
@@ -705,7 +742,7 @@ class ConditionalLERAnalyzer:
                 for key_vals in sorted(partitions):
                     label = _make_label(metric_config.group_by, key_vals)
                     if multi_metric:
-                        label = _metric_label(metric_name, label)
+                        label = _metric_label(display_name, label)
                     self._plot_fitting_group(
                         ax, partitions[key_vals], metric_config, label=label, style=style
                     )
@@ -713,8 +750,18 @@ class ConditionalLERAnalyzer:
         if config.group_by or multi_metric:
             ax.legend()
 
-        ax.set_xlabel(metric_names[0] if not multi_metric else "Metric value")
-        ax.set_ylabel(r"$\log\!\left(\dfrac{1 - y}{y}\right)$")
+        if config.xlabel is not None:
+            ax.set_xlabel(config.xlabel)
+        else:
+            if not multi_metric:
+                ax.set_xlabel(config.metric_labels.get(metric_names[0], metric_names[0]))
+            else:
+                ax.set_xlabel("Metric value")
+
+        ax.set_ylabel(
+            config.ylabel if config.ylabel is not None
+            else r"$\log\!\left(\dfrac{1 - y}{y}\right)$"
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -735,6 +782,8 @@ class ConditionalLERAnalyzer:
         sub = df.drop_nulls([config.metric_name, "is_logical_error"])
         x = sub[config.metric_name].to_numpy().astype(float)
         y = sub["is_logical_error"].to_numpy().astype(float)
+        if config.convert_db:
+            x = _DB_FACTOR * x
         round_digits = _normalize_round_digits(config.round_digits)
         if round_digits is not None:
             x = np.round(x, decimals=round_digits)

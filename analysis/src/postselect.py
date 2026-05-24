@@ -230,13 +230,19 @@ class PostSelectionPlotter:
         num_points: int = 50,
         alpha: float = 0.05,
         shade_alpha: float = 0.2,
+        reduction_rate: bool = False,
         **plot_kw: Any,
     ) -> None:
         for spec in specs:
-            self._plot_spec(spec, ax, num_points, alpha, shade_alpha, plot_kw)
+            self._plot_spec(
+                spec, ax, num_points, alpha, shade_alpha, plot_kw, reduction_rate
+            )
 
         ax.set_xlabel("Abort rate")
-        ax.set_ylabel("Post-selected logical error rate")
+        if reduction_rate:
+            ax.set_ylabel("LER reduction rate (post-LER / original-LER)")
+        else:
+            ax.set_ylabel("Post-selected logical error rate")
         ax.set_xlim(0.0, 1.0)
         ax.legend()
 
@@ -248,6 +254,7 @@ class PostSelectionPlotter:
         alpha: float,
         shade_alpha: float,
         plot_kw: dict,
+        reduction_rate: bool,
     ) -> None:
         direction = spec.direction or _infer_direction(spec.metric_name)
 
@@ -280,13 +287,13 @@ class PostSelectionPlotter:
                 label = f"{prefix}{spec.metric_name} | {group_label}"
                 self._compute_and_plot(
                     part_df, spec, direction, ax,
-                    num_points, alpha, shade_alpha, plot_kw, label,
+                    num_points, alpha, shade_alpha, plot_kw, label, reduction_rate,
                 )
         else:
             label = f"{prefix}{spec.metric_name}"
             self._compute_and_plot(
                 df, spec, direction, ax,
-                num_points, alpha, shade_alpha, plot_kw, label,
+                num_points, alpha, shade_alpha, plot_kw, label, reduction_rate,
             )
 
     def _compute_and_plot(
@@ -300,9 +307,11 @@ class PostSelectionPlotter:
         shade_alpha: float,
         plot_kw: dict,
         label: str,
+        reduction_rate: bool,
     ) -> None:
         if direction == "boolean":
             curve = postselect_curve_ar(df, spec.metric_name, alpha=alpha)
+            original_ler = df["is_logical_error"].mean()
         else:
             sub = df.drop_nulls([spec.metric_name, "is_logical_error"])
             values = sub[spec.metric_name].to_numpy().astype(float)
@@ -311,16 +320,29 @@ class PostSelectionPlotter:
                 values, is_error, direction,
                 num_points=num_points, alpha=alpha,
             )
+            original_ler = float(is_error.mean()) if is_error.size > 0 else np.nan
 
         if curve.abort_rates.size == 0:
             return
 
-        valid = ~np.isnan(curve.post_lers)
+        y = curve.post_lers
+        ci_lo = curve.ci_low
+        ci_hi = curve.ci_high
+
+        if reduction_rate:
+            if original_ler and original_ler > 0:
+                y = y / original_ler
+                ci_lo = ci_lo / original_ler
+                ci_hi = ci_hi / original_ler
+            else:
+                return
+
+        valid = ~np.isnan(y)
         line, = ax.plot(
-            curve.abort_rates[valid], curve.post_lers[valid],
+            curve.abort_rates[valid], y[valid],
             marker="o", label=label, **plot_kw,
         )
         shade_ci(
-            ax, curve.abort_rates, curve.ci_low, curve.ci_high,
+            ax, curve.abort_rates, ci_lo, ci_hi,
             color=line.get_color(), alpha=shade_alpha,
         )

@@ -383,6 +383,11 @@ def filter_dem_by_basis(
             if not new_components[0]:
                 continue
 
+            # Drop empty non-first components (arise when an X-only decomposition
+            # component loses all its detectors after filtering, e.g.
+            # "D_Z1 D_Z2 ^ D_X3" → "D_Z1 D_Z2 ^" which stim rejects).
+            new_components = new_components[:1] + [c for c in new_components[1:] if c]
+
             # Reconstruct targets, re-inserting "^" separators.
             new_targets: list[stim.DemTarget] = []
             for i, comp in enumerate(new_components):
