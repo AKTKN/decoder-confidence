@@ -56,6 +56,13 @@ def _parse_dir_name(name: str) -> dict[str, Any] | None:
         except ValueError:
             return None
 
+    ibm_reproduce_value: bool | None = None
+    if "ibm_reproduce" in values:
+        try:
+            ibm_reproduce_value = _parse_bool(values["ibm_reproduce"])
+        except ValueError:
+            return None
+
     return {
         "code": values["code"],
         "d": d_value,
@@ -63,6 +70,7 @@ def _parse_dir_name(name: str) -> dict[str, Any] | None:
         "noisemodel": values["noisemodel"],
         "p": p_value,
         "xyz": xyz_value,
+        "ibm_reproduce": ibm_reproduce_value,
     }
 
 
@@ -75,6 +83,7 @@ def _find_circuit_dir(
     noise_model: str,
     p: float,
     xyz: bool | None,
+    ibm_reproduce: bool = False,
 ) -> Path:
     if not data_dir.exists():
         raise FileNotFoundError(f"data_dir not found: {data_dir}")
@@ -101,12 +110,20 @@ def _find_circuit_dir(
                 continue
             if parsed["xyz"] != xyz:
                 continue
+        if ibm_reproduce:
+            if parsed.get("ibm_reproduce") is not True:
+                continue
+        else:
+            if parsed.get("ibm_reproduce") is True:
+                continue
         matches.append(path)
 
     if not matches:
         expected = f"code={code},d={d},rounds={rounds},noisemodel={noise_model},p={p}"
         if xyz is not None:
             expected = f"{expected},xyz={xyz}"
+        if ibm_reproduce:
+            expected = f"{expected},ibm_reproduce=True"
         raise FileNotFoundError(
             f"Circuit directory not found under {data_dir}. Expected {expected}"
         )
@@ -209,6 +226,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Match circuit directories with xyz=<value>",
     )
     parser.add_argument(
+        "--ibm_reproduce",
+        action="store_true",
+        default=False,
+        help="If set, use circuit directories with ibm_reproduce=True",
+    )
+    parser.add_argument(
         "--verbose",
         default=False,
         type=_parse_bool,
@@ -252,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         noise_model=args.noise_model,
         p=args.p,
         xyz=args.xyz,
+        ibm_reproduce=args.ibm_reproduce,
     )
 
     dem_path = circuit_dir / "dem.dem"
