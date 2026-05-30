@@ -18,6 +18,7 @@ import numpy as np
 import polars as pl
 import stim
 
+from decoder_confidence.varint import encode_obs_flip_shot
 from decoder_confidence.execution.hashing import chunk_path
 from decoder_confidence.execution.models import (
     DecoderFactory,
@@ -230,6 +231,10 @@ def run_task(task: SimulationTask) -> WorkerResult:
             "is_logical_error": is_logical_error,
         }
         columns.update(_normalize_metrics(result.metrics, task.num_shots))
+
+        if result.obs_flip_idx is not None:
+            blobs = [encode_obs_flip_shot(idxs) for idxs in result.obs_flip_idx]
+            columns["obs_flip_idx"] = pl.Series("obs_flip_idx", blobs, dtype=pl.Binary)
 
         df = pl.DataFrame(columns)
         df.write_parquet(output_path, compression="zstd")

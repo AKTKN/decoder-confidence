@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 import polars as pl
 
+from decoder_confidence.varint import write_obs_flip_idx_file
 from decoder_confidence.decoding.decoder_factory import load_decoder_factory
 from decoder_confidence.decoding.metadata import build_decoding_metadata, write_metadata
 from decoder_confidence.execution.manager import ExecutionConfig, run_manager
@@ -175,6 +176,12 @@ def _collect_results(
         scan.select(["shot_id", pl.col(metric_col).alias(metric_name)]).sink_parquet(
             metric_path, compression="zstd"
         )
+
+    if "obs_flip_idx" in schema:
+        obs_df = scan.select(["shot_id", "obs_flip_idx"]).sort("shot_id").collect()
+        blobs: list[bytes] = obs_df["obs_flip_idx"].to_list()
+        obs_path = output_dir / f"obs_flip_idx_batch={batch_num}.bin"
+        write_obs_flip_idx_file(obs_path, blobs)
 
     return metric_names
 

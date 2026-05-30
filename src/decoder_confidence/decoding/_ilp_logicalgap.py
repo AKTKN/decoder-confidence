@@ -44,13 +44,19 @@ class _ILPLogicalGapDecoder(DecoderBase):
                 ],
                 dtype=float,
             )
+            obs_flip_idx = [
+                list(result.metadata.get("obs_flip_idx") or [])
+                for result in results
+            ]
         else:
             predictions = np.zeros((0, 0), dtype=bool)
             logical_gap = np.zeros((0,), dtype=float)
+            obs_flip_idx = []
 
         return DecodingResult(
             predictions=predictions,
             metrics={"logical_gap": logical_gap},
+            obs_flip_idx=obs_flip_idx,
         )
 
 

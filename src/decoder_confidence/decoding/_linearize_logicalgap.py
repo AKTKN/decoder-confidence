@@ -93,6 +93,7 @@ class LinearizeLogicalGapDecoder(DecoderBase):
 
         predictions = np.zeros((num_shots, num_obs), dtype=np.bool_)
         gap = np.full((num_shots,), np.nan, dtype=float)
+        obs_flip_idx: list[list[int]] = []
 
         for shot in range(num_shots):
             syndrome = syndromes[shot]
@@ -107,10 +108,12 @@ class LinearizeLogicalGapDecoder(DecoderBase):
             predictions[shot] = l1.astype(np.bool_)
 
             if num_obs == 0:
+                obs_flip_idx.append([])
                 continue
 
             # --- Stage 2: one decode per observable, forcing it to flip ---
             best_w2 = np.inf
+            best_flip: list[int] = []
             for i in range(num_obs):
                 obs_row_i = _get_obs_row(self._observables, i)
                 aug_check = _append_row(self._base_check_matrix, obs_row_i)
@@ -122,19 +125,25 @@ class LinearizeLogicalGapDecoder(DecoderBase):
                 self.adapter.set_priors(self._base_priors.copy())
                 c2 = np.asarray(self.adapter.decode(aug_syndrome), dtype=np.bool_)
 
+                l2 = _logical_from_correction(self._observables, c2)
                 w2_i = float(self._weights @ c2.astype(int))
                 if w2_i < best_w2:
                     best_w2 = w2_i
+                    # Indices where stage-2 logical class differs from stage-1
+                    diff = np.asarray(l1, dtype=int) ^ np.asarray(l2, dtype=int)
+                    best_flip = list(np.where(diff)[0])
 
             # Restore original state for the next shot
             self.adapter.set_check_matrix(self._base_check_matrix)
             self.adapter.set_priors(self._base_priors.copy())
 
             gap[shot] = best_w2 - w1
+            obs_flip_idx.append(best_flip)
 
         return DecodingResult(
             predictions=predictions,
             metrics={"linearize_logicalgap": gap},
+            obs_flip_idx=obs_flip_idx,
         )
 
 

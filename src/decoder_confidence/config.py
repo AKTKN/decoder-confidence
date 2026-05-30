@@ -26,6 +26,7 @@ class DecodingResult:
 	"""Standard output for all decoders."""
 	predictions: np.ndarray
 	metrics: Dict[str, Any] = field(default_factory=dict)
+	obs_flip_idx: list[list[int]] | None = None
 
 
 def validate_seed(seed: int) -> None:
