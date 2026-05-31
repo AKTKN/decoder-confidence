@@ -10,6 +10,7 @@ from decoder_confidence.decoding._argument_reweighting import (
     make_argument_reweighting_factory,
 )
 from decoder_confidence.decoding._ilp_logicalgap import make_ilp_decoder_factory
+from decoder_confidence.decoding._ilp_cplex_logicalgap import make_cplex_decoder_factory
 from decoder_confidence.decoding._linearize_logicalgap import (
     make_linearize_logicalgap_factory,
 )
@@ -124,7 +125,21 @@ def load_decoder_factory(
         return factory, info
 
     if decoder_name == "ILP":
-        factory = make_ilp_decoder_factory(dem_path, decoder_options)
+        solver = str(decoder_options.get("solver") or "").strip().lower()
+        if not solver:
+            raise ValueError(
+                "decoder_options.solver is required for ILP decoder. "
+                "Set solver: gurobi or solver: cplex"
+            )
+        if solver == "gurobi":
+            factory = make_ilp_decoder_factory(dem_path, decoder_options)
+        elif solver == "cplex":
+            factory = make_cplex_decoder_factory(dem_path, decoder_options)
+        else:
+            raise ValueError(
+                f"Unknown solver '{solver}' for ILP decoder. "
+                "Supported values: gurobi, cplex"
+            )
         info = DecoderConfigInfo(
             decoder_name=decoder_name,
             metric_name=metric_name,
