@@ -1,0 +1,74 @@
+# Configuration for the unroll-vs-repeat BB circuit comparison experiment.
+#
+# This experiment compares the logical error rate of two structural variants of
+# the IBM-style inline-noise BB circuit:
+#
+#   unrolled — all syndrome rounds expanded as flat stim instructions (original
+#              implementation before the REPEAT-block refactor)
+#   repeat   — first round flat, remaining rounds inside a stim REPEAT block
+#              (current production implementation)
+#
+# For each (p, decoder) combination, both circuits are submitted to sinter as
+# separate tasks so their logical error rates can be compared directly.
+#
+# Note: experiment.noise_model and experiment.ibm_reproduce are ignored by this
+# experiment.  The circuit builders always use IBM-style inline noise (DEPOLARIZE2
+# after CNOTs, X_ERROR/Z_ERROR for reset and measurement errors, DEPOLARIZE1 for
+# idle data qubits) at the rate given by p_values.
+
+runtime:
+  write_plots: false
+
+output:
+  output_root: results/unroll_vs_repeat_runs
+
+experiment:
+  circuit: bivariate_bicycle_code_Z
+  basis: z
+  noise_mode: theoretical
+  # noise_model and ibm_reproduce are accepted but ignored by this experiment.
+  noise_model: uniform
+  ibm_reproduce: true
+
+  # BB code parameters (bivariate bicycle [[72, 12, 6]] code)
+  l: 6
+  m: 6
+  a_x_pows: [3]
+  a_y_pows: [1, 2]
+  b_x_pows: [1, 2]
+  b_y_pows: [3]
+
+  num_rounds: 6
+
+  p_values: [0.001, 0.003, 0.005, 0.007, 0.01]
+  shots: 100000
+
+  processes: 6
+  detector_seed_base: 4
+  print_progress: true
+
+  # Convention: use_both=true requires xyz_decoding=false.
+  #   use_both: true  → xyz_decoding: false  (filter X detectors; BP uses primary-basis check matrix only)
+  #   use_both: false → xyz_decoding: false  (no X detectors in circuit anyway; filter is a no-op)
+  xyz_decoding: false
+  use_both: false
+
+  decoders:
+    - bplsd
+    - bposd
+
+
+decoder_params:
+  bplsd:
+    max_iter: 20
+    bp_method: ms
+    ms_scaling_factor: 0.625
+    lsd_order: 0
+    schedule: parallel
+
+  bposd:
+    max_iter: 100
+    bp_method: ms
+    ms_scaling_factor: 0.625
+    osd_method: OSD_CS
+    osd_order: 1
