@@ -37,7 +37,6 @@ from decoder_confidence.execution._execution_utils import (
     select_core_ids,
 )
 from decoder_confidence.execution.batching import estimate_shots_per_task
-from decoder_confidence.execution.manager import _run_probe
 from decoder_confidence.execution.models import (
     SharedEnvDecoderFactory,
     SimulationTask,
@@ -318,36 +317,6 @@ def _chunk_loop(
     return results
 
 
-def _run_tasks_multiprocess(
-    tasks: list[SimulationTask],
-    *,
-    dem_path: Path,
-    chunk_dir: Path,
-    decoder_factory,
-    num_workers: int,
-    verbose: bool,
-    max_chunk_files: int | None,
-    merge_chunk_group_size: int | None,
-) -> list[WorkerResult]:
-    core_ids = select_core_ids(num_workers, None)
-    worker_config = WorkerConfig(
-        dem_path=dem_path,
-        output_dir=chunk_dir,
-        decoder_factory=decoder_factory,
-        core_ids=core_ids,
-    )
-    ctx = mp.get_context("spawn")
-    with ctx.Pool(
-        processes=num_workers, initializer=init_worker, initargs=(worker_config,)
-    ) as pool:
-        return _chunk_loop(
-            pool.imap_unordered(run_task, tasks, chunksize=1),
-            total_tasks=len(tasks),
-            chunk_dir=chunk_dir,
-            verbose=verbose,
-            max_chunk_files=max_chunk_files,
-            merge_chunk_group_size=merge_chunk_group_size,
-        )
 
 
 def _run_tasks_threaded(
@@ -561,50 +530,18 @@ def main(argv: list[str] | None = None) -> int:
                     probe_result.output_path.unlink()
                 except OSError:
                     pass
-        else:
-            dem = None
-            shared_env = None
-            decoder_name = None
 
-            core_ids = select_core_ids(num_workers, None)
-            worker_config = WorkerConfig(
-                dem_path=dem_path,
-                output_dir=chunk_dir,
-                decoder_factory=decoder_factory,
-                core_ids=core_ids,
+            shots_per_task = estimate_shots_per_task(
+                probe_shots, probe_result.duration_s, 30.0, min_shots=1,
             )
-            probe_task = SimulationTask(
-                dets_path=dets_path,
-                start_shot_index=probe_start,
-                num_shots=probe_shots,
-                batch_id=0,
-                shot_id_offset=shot_id_offset,
-            )
-            probe_result = _run_probe(worker_config, probe_task)
-            if probe_result.status != "ok":
-                raise RuntimeError(f"Probe failed: {probe_result.message}")
-            if probe_result.output_path.exists():
-                try:
-                    probe_result.output_path.unlink()
-                except OSError:
-                    pass
+            if verbose:
+                print(f"[resume] probe: {probe_shots} shots in {probe_result.duration_s:.3f}s "
+                      f"→ shots_per_task={shots_per_task}")
 
-        shots_per_task = estimate_shots_per_task(
-            probe_shots,
-            probe_result.duration_s,
-            30.0,
-            min_shots=1,
-        )
-        if verbose:
-            print(f"[resume] probe: {probe_shots} shots in {probe_result.duration_s:.3f}s "
-                  f"→ shots_per_task={shots_per_task}")
+            tasks = _make_resume_tasks(uncovered, dets_path, shot_id_offset, shots_per_task)
+            print(f"[resume] {len(tasks)} tasks for {sum(t.num_shots for t in tasks)} remaining shots")
 
-        tasks = _make_resume_tasks(uncovered, dets_path, shot_id_offset, shots_per_task)
-        print(f"[resume] {len(tasks)} tasks for {sum(t.num_shots for t in tasks)} remaining shots")
-
-        start_time = datetime.now(timezone.utc)
-
-        if is_threaded:
+            start_time = datetime.now(timezone.utc)
             new_results = _run_tasks_threaded(
                 tasks,
                 dem=dem,
@@ -621,16 +558,54 @@ def main(argv: list[str] | None = None) -> int:
                 merge_chunk_group_size=merge_chunk_group_size,
             )
         else:
-            new_results = _run_tasks_multiprocess(
-                tasks,
+            # Non-threaded path (e.g., CPLEX): run probe inside the main pool so
+            # workers are spawned only once instead of twice (probe pool + task pool).
+            core_ids = select_core_ids(num_workers, None)
+            worker_config = WorkerConfig(
                 dem_path=dem_path,
-                chunk_dir=chunk_dir,
+                output_dir=chunk_dir,
                 decoder_factory=decoder_factory,
-                num_workers=num_workers,
-                verbose=verbose,
-                max_chunk_files=max_chunk_files,
-                merge_chunk_group_size=merge_chunk_group_size,
+                core_ids=core_ids,
             )
+            probe_task = SimulationTask(
+                dets_path=dets_path,
+                start_shot_index=probe_start,
+                num_shots=probe_shots,
+                batch_id=0,
+                shot_id_offset=shot_id_offset,
+            )
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(
+                processes=num_workers, initializer=init_worker, initargs=(worker_config,)
+            ) as pool:
+                probe_result = pool.apply(run_task, (probe_task,))
+                if probe_result.status != "ok":
+                    raise RuntimeError(f"Probe failed: {probe_result.message}")
+                if probe_result.output_path.exists():
+                    try:
+                        probe_result.output_path.unlink()
+                    except OSError:
+                        pass
+
+                shots_per_task = estimate_shots_per_task(
+                    probe_shots, probe_result.duration_s, 30.0, min_shots=1,
+                )
+                if verbose:
+                    print(f"[resume] probe: {probe_shots} shots in {probe_result.duration_s:.3f}s "
+                          f"→ shots_per_task={shots_per_task}")
+
+                tasks = _make_resume_tasks(uncovered, dets_path, shot_id_offset, shots_per_task)
+                print(f"[resume] {len(tasks)} tasks for {sum(t.num_shots for t in tasks)} remaining shots")
+
+                start_time = datetime.now(timezone.utc)
+                new_results = _chunk_loop(
+                    pool.imap_unordered(run_task, tasks, chunksize=1),
+                    total_tasks=len(tasks),
+                    chunk_dir=chunk_dir,
+                    verbose=verbose,
+                    max_chunk_files=max_chunk_files,
+                    merge_chunk_group_size=merge_chunk_group_size,
+                )
     else:
         print("[resume] All shots already complete. Skipping decoding, running collection only.")
         start_time = datetime.now(timezone.utc)
