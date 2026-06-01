@@ -1,6 +1,6 @@
 metric: logical_gap
 decoder: ILP
 decoder_options:
-  solver: gurobi
+  solver: cplex
   threads: 1
 metric_options:

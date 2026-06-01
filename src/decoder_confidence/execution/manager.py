@@ -3,9 +3,6 @@ from __future__ import annotations
 import multiprocessing as mp
 import time
 
-import polars as pl
-import stim
-
 from decoder_confidence.execution._execution_utils import (
     build_file_infos,
     bytes_per_shot_count,
@@ -19,7 +16,6 @@ from decoder_confidence.execution._execution_utils import (
 )
 from decoder_confidence.execution.batching import estimate_shots_per_task
 from decoder_confidence.execution.models import (
-    DecoderFactory,
     DetsFileInfo,
     ExecutionConfig,
     SharedEnvDecoderFactory,
@@ -35,12 +31,6 @@ __all__ = [
     "DetsFileInfo",
     "run_manager",
 ]
-
-
-def _run_probe(worker_config: WorkerConfig, probe_task: SimulationTask) -> WorkerResult:
-    ctx = mp.get_context("spawn")
-    with ctx.Pool(processes=1, initializer=init_worker, initargs=(worker_config,)) as pool:
-        return pool.apply(run_task, (probe_task,))
 
 
 def _run_manager_multiprocess(config: ExecutionConfig) -> list[WorkerResult]:
@@ -84,45 +74,8 @@ def _run_manager_multiprocess(config: ExecutionConfig) -> list[WorkerResult]:
         shot_id_offset=probe_info.shot_id_offset,
     )
 
-    probe_result = _run_probe(worker_config, probe_task)
-    if probe_result.status != "ok":
-        raise RuntimeError(f"Probe task failed: {probe_result.message}")
-
-    if probe_result.output_path.exists():
-        try:
-            probe_result.output_path.unlink()
-        except OSError:
-            pass
-
-    shots_per_task = estimate_shots_per_task(
-        probe_shots,
-        probe_result.duration_s,
-        config.target_task_seconds,
-        min_shots=1,
-        max_shots=config.max_shots_per_task,
-    )
-
-    tasks: list[SimulationTask] = []
-    batch_id = 1
-    for info in file_infos:
-        start = 0
-        while start < info.total_shots:
-            num = min(shots_per_task, info.total_shots - start)
-            tasks.append(
-                SimulationTask(
-                    dets_path=info.path,
-                    start_shot_index=start,
-                    num_shots=num,
-                    batch_id=batch_id,
-                    shot_id_offset=info.shot_id_offset,
-                )
-            )
-            batch_id += 1
-            start += num
-
     results: list[WorkerResult] = []
     start_time = time.perf_counter()
-    total_tasks = len(tasks)
     completed_tasks = 0
     ok_count = 0
     skipped_count = 0
@@ -169,6 +122,48 @@ def _run_manager_multiprocess(config: ExecutionConfig) -> list[WorkerResult]:
     with ctx.Pool(
         processes=config.num_workers, initializer=init_worker, initargs=(worker_config,)
     ) as pool:
+        # Run probe inside the already-initialised pool so workers are spawned
+        # only once.  Using a separate Pool for the probe (as before) caused a
+        # double spawn cycle: 1-worker pool for probe, then 96-worker pool for
+        # the actual tasks — each cycle re-imports heavy libraries from NFS.
+        probe_result = pool.apply(run_task, (probe_task,))
+        if probe_result.status != "ok":
+            raise RuntimeError(f"Probe task failed: {probe_result.message}")
+
+        if probe_result.output_path.exists():
+            try:
+                probe_result.output_path.unlink()
+            except OSError:
+                pass
+
+        shots_per_task = estimate_shots_per_task(
+            probe_shots,
+            probe_result.duration_s,
+            config.target_task_seconds,
+            min_shots=1,
+            max_shots=config.max_shots_per_task,
+        )
+
+        tasks: list[SimulationTask] = []
+        batch_id = 1
+        for info in file_infos:
+            start = 0
+            while start < info.total_shots:
+                num = min(shots_per_task, info.total_shots - start)
+                tasks.append(
+                    SimulationTask(
+                        dets_path=info.path,
+                        start_shot_index=start,
+                        num_shots=num,
+                        batch_id=batch_id,
+                        shot_id_offset=info.shot_id_offset,
+                    )
+                )
+                batch_id += 1
+                start += num
+
+        total_tasks = len(tasks)
+
         for result in pool.imap_unordered(run_task, tasks, chunksize=1):
             results.append(result)
             completed_tasks += 1
