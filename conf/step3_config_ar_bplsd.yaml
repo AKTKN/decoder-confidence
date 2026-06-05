@@ -3,7 +3,7 @@ metric: ar-lec
 
 decoder_options:
   # Number of BP iterations before LSD fallback
-  max_iter: 20
+  max_iter: 30
   # BP scheduling: "flooding" or "min_sum"
   bp_method: min_sum
   # LSD order (0 = LSD-0, fastest; higher = more accurate)
@@ -13,6 +13,6 @@ metric_options:
   # Reweighting test: "Ratio" or "Gap"
   test_type: Ratio
   # Ratio test: b > 1 (larger → more aggressive reweighting)
-  b: 2.0
+  b: 1.01
   # Number of decode-reweight rounds (>= 2)
   num_decoding_rounds: 2
