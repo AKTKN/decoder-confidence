@@ -58,7 +58,20 @@ def _format_label(parts: list[tuple[str, Any]]) -> str:
 
 @dataclass
 class PostSelectSpec:
-    """One metric's contribution to a post-selection plot."""
+    """One metric's contribution to a post-selection plot.
+
+    Attributes
+    ----------
+    threshold_mode:
+        ``"continuous"`` (default) sweeps a quantile grid of *num_points*
+        abort-rate values.  ``"unique"`` uses every distinct metric value as
+        a threshold (one curve point per unique value); markers are drawn in
+        this mode.
+    grid_scale:
+        For ``threshold_mode="continuous"`` only.  ``"linear"`` (default) for
+        uniformly spaced quantiles; ``"log"`` to concentrate points near
+        abort-rate = 0.
+    """
 
     metric_name: str
     decoder_names: Optional[List[str]] = None
@@ -67,6 +80,8 @@ class PostSelectSpec:
     batch_indices: Optional[List[int]] = None
     direction: Optional[str] = None
     label_prefix: Optional[str] = None
+    threshold_mode: str = "continuous"
+    grid_scale: str = "linear"
 
 
 @dataclass
@@ -86,6 +101,7 @@ def postselect_curve_continuous(
     direction: str,
     num_points: int = 50,
     alpha: float = 0.05,
+    grid_scale: str = "linear",
 ) -> PostSelectCurve:
     """Sweep an abort-rate grid by quantiles of *values* and compute post-LER.
 
@@ -99,13 +115,17 @@ def postselect_curve_continuous(
         ``"high"`` to keep high values (abort low), ``"low"`` to keep low values
         (abort high).
     num_points:
-        Number of points on the curve.  Abort-rate grid is
-        ``linspace(0, 1, num_points + 1)[:-1]``.
+        Number of points on the curve.
     alpha:
         Wilson CI significance level (default 0.05 → 95 % CI).
+    grid_scale:
+        ``"linear"`` (default) for uniformly spaced quantile grid, or ``"log"``
+        to concentrate points near abort-rate = 0 (log-spaced quantiles).
     """
     if direction not in {"high", "low"}:
         raise ValueError(f"direction must be 'high' or 'low', got {direction!r}")
+    if grid_scale not in {"linear", "log"}:
+        raise ValueError(f"grid_scale must be 'linear' or 'log', got {grid_scale!r}")
 
     values = np.asarray(values, dtype=float)
     is_error = np.asarray(is_error, dtype=bool)
@@ -116,7 +136,12 @@ def postselect_curve_continuous(
         empty_i = np.array([], dtype=int)
         return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i)
 
-    abort_grid = np.linspace(0.0, 1.0, num_points + 1)[:-1]
+    if grid_scale == "log":
+        # Concentrate points near abort-rate = 0; include 0 explicitly.
+        log_part = np.logspace(-3, np.log10(0.9999), num_points - 1)
+        abort_grid = np.concatenate([[0.0], log_part])
+    else:
+        abort_grid = np.linspace(0.0, 1.0, num_points + 1)[:-1]
 
     abort_rates = np.full(num_points, np.nan)
     post_lers = np.full(num_points, np.nan)
@@ -152,6 +177,73 @@ def postselect_curve_continuous(
         ci_low=ci_low[order],
         ci_high=ci_high[order],
         accepted=accepted[order],
+    )
+
+
+def postselect_curve_unique_thresholds(
+    values: np.ndarray,
+    is_error: np.ndarray,
+    direction: str,
+    alpha: float = 0.05,
+) -> PostSelectCurve:
+    """Compute one post-selection point per unique metric value used as threshold.
+
+    Parameters
+    ----------
+    values:
+        Per-shot metric values.
+    is_error:
+        Per-shot boolean (or 0/1) array, aligned with *values*.
+    direction:
+        ``"high"`` to keep high values (abort low), ``"low"`` to keep low values
+        (abort high).
+    alpha:
+        Wilson CI significance level (default 0.05 → 95 % CI).
+    """
+    if direction not in {"high", "low"}:
+        raise ValueError(f"direction must be 'high' or 'low', got {direction!r}")
+
+    values = np.asarray(values, dtype=float)
+    is_error = np.asarray(is_error, dtype=bool)
+    n_total = values.size
+
+    if n_total == 0:
+        empty_f = np.array([], dtype=float)
+        empty_i = np.array([], dtype=int)
+        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i)
+
+    unique_vals = np.unique(values)
+
+    rows = []
+    for threshold in unique_vals:
+        if direction == "high":
+            mask = values >= threshold
+        else:
+            mask = values <= threshold
+
+        n_acc = int(mask.sum())
+        if n_acc == 0:
+            continue
+
+        abort = 1.0 - n_acc / n_total
+        k_err = int(is_error[mask].sum())
+        post_ler = k_err / n_acc
+        lo, hi = wilson_ci(k_err, n_acc, alpha=alpha)
+        rows.append((abort, post_ler, float(lo), float(hi), n_acc))
+
+    if not rows:
+        empty_f = np.array([], dtype=float)
+        empty_i = np.array([], dtype=int)
+        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i)
+
+    rows.sort(key=lambda r: r[0])
+    abort_arr, ler_arr, lo_arr, hi_arr, acc_arr = zip(*rows)
+    return PostSelectCurve(
+        abort_rates=np.array(abort_arr, dtype=float),
+        post_lers=np.array(ler_arr, dtype=float),
+        ci_low=np.array(lo_arr, dtype=float),
+        ci_high=np.array(hi_arr, dtype=float),
+        accepted=np.array(acc_arr, dtype=int),
     )
 
 
@@ -316,10 +408,16 @@ class PostSelectionPlotter:
             sub = df.drop_nulls([spec.metric_name, "is_logical_error"])
             values = sub[spec.metric_name].to_numpy().astype(float)
             is_error = sub["is_logical_error"].to_numpy().astype(bool)
-            curve = postselect_curve_continuous(
-                values, is_error, direction,
-                num_points=num_points, alpha=alpha,
-            )
+            if spec.threshold_mode == "unique":
+                curve = postselect_curve_unique_thresholds(
+                    values, is_error, direction, alpha=alpha,
+                )
+            else:
+                curve = postselect_curve_continuous(
+                    values, is_error, direction,
+                    num_points=num_points, alpha=alpha,
+                    grid_scale=spec.grid_scale,
+                )
             original_ler = float(is_error.mean()) if is_error.size > 0 else np.nan
 
         if curve.abort_rates.size == 0:
@@ -338,10 +436,17 @@ class PostSelectionPlotter:
                 return
 
         valid = ~np.isnan(y)
-        line, = ax.plot(
-            curve.abort_rates[valid], y[valid],
-            marker="o", label=label, **plot_kw,
-        )
+        use_markers = direction == "boolean" or spec.threshold_mode == "unique"
+        if use_markers:
+            line, = ax.plot(
+                curve.abort_rates[valid], y[valid],
+                marker="o", linestyle="-", label=label, **plot_kw,
+            )
+        else:
+            line, = ax.plot(
+                curve.abort_rates[valid], y[valid],
+                label=label, **plot_kw,
+            )
         shade_ci(
             ax, curve.abort_rates, ci_lo, ci_hi,
             color=line.get_color(), alpha=shade_alpha,

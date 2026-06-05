@@ -13,6 +13,10 @@ from analysis.src.postselect import (
     postselect_curve_ar,
     postselect_curve_continuous,
 )
+from analysis.src.relative_improvement import (
+    RelImprovSpec,
+    RelativeImprovementPlotter,
+)
 
 __all__ = [
     "PlotConfig",
@@ -27,4 +31,6 @@ __all__ = [
     "PostSelectionPlotter",
     "postselect_curve_continuous",
     "postselect_curve_ar",
+    "RelImprovSpec",
+    "RelativeImprovementPlotter",
 ]
