@@ -7,8 +7,8 @@ are shaded around each curve.
 
 Direction depends on the metric:
 
-* ``logical_gap``, ``linearize_logicalgap``: higher = more confident, so
-  low-value shots are aborted preferentially (``direction="high"``).
+* ``logical_gap``, ``linearize_logicalgap``, ``forced_gap_ml``: higher = more
+  confident, so low-value shots are aborted preferentially (``direction="high"``).
 * ``cluster_llr``: lower = more confident, so high-value shots are aborted
   preferentially (``direction="low"``).
 * ``ar-pec`` / ``ar-lec``: accept/reject is already decided per-shot; the
@@ -32,7 +32,7 @@ from analysis.src.data_manager import SimulationDataManager
 
 
 HIGH_CONFIDENCE_METRICS: frozenset[str] = frozenset(
-    {"logical_gap", "linearize_logicalgap"}
+    {"logical_gap", "linearize_logicalgap", "forced_gap_ml"}
 )
 LOW_CONFIDENCE_METRICS: frozenset[str] = frozenset({"cluster_llr"})
 BOOLEAN_METRICS: frozenset[str] = frozenset({"ar-pec", "ar-lec"})

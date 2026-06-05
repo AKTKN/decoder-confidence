@@ -110,10 +110,14 @@ class ForcedGapMLDecoder(DecoderBase):
             ml_weight, ml_logical = all_solutions[0]
             predictions[shot] = ml_logical.astype(np.bool_)
 
-            if len(all_solutions) >= 2:
-                gap[shot] = all_solutions[1][0] - ml_weight
-            else:
-                gap[shot] = np.nan
+            # Gap: min weight among solutions in a different logical class - ml_weight
+            # all_solutions is sorted, so iterate to find the first different-class solution
+            best_diff_weight = np.inf
+            for w, l in all_solutions[1:]:
+                if not np.array_equal(l, ml_logical):
+                    best_diff_weight = w
+                    break
+            gap[shot] = (best_diff_weight - ml_weight) if np.isfinite(best_diff_weight) else np.nan
 
             diff = np.asarray(l1, dtype=int) ^ np.asarray(ml_logical, dtype=int)
             obs_flip_idx.append(list(np.where(diff)[0]))

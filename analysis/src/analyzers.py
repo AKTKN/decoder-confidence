@@ -45,7 +45,7 @@ _INTERNAL_PLOT_PARAMS = frozenset(
 )
 
 # Metrics for which gap → dB conversion is meaningful.
-_GAP_METRICS = frozenset({"logical_gap", "linearize_logicalgap"})
+_GAP_METRICS = frozenset({"logical_gap", "linearize_logicalgap", "forced_gap_ml"})
 
 # Multiplicative factor for gap → dB: gap_dB = _DB_FACTOR * gap
 _DB_FACTOR: float = 10.0 / np.log(10.0)
@@ -253,15 +253,15 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
             invalid = [n for n in metric_names if n not in _GAP_METRICS]
             if invalid:
                 raise ValueError(
-                    "use_negative_gap is only supported for logical_gap and "
-                    "linearize_logicalgap"
+                    "use_negative_gap is only supported for gap metrics: "
+                    + ", ".join(sorted(_GAP_METRICS))
                 )
         if convert_db:
             invalid = [n for n in metric_names if n not in _GAP_METRICS]
             if invalid:
                 raise ValueError(
-                    "convert_db is only supported for logical_gap and "
-                    "linearize_logicalgap"
+                    "convert_db is only supported for gap metrics: "
+                    + ", ".join(sorted(_GAP_METRICS))
                 )
 
         style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
@@ -372,12 +372,13 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
 
         if use_negative_gap and metric_name not in _GAP_METRICS:
             raise ValueError(
-                "use_negative_gap is only supported for logical_gap and "
-                "linearize_logicalgap"
+                "use_negative_gap is only supported for gap metrics: "
+                + ", ".join(sorted(_GAP_METRICS))
             )
         if convert_db and metric_name not in _GAP_METRICS:
             raise ValueError(
-                "convert_db is only supported for logical_gap and linearize_logicalgap"
+                "convert_db is only supported for gap metrics: "
+                + ", ".join(sorted(_GAP_METRICS))
             )
 
         df = _collect_for_plot(lf, metric_name, [])
@@ -617,6 +618,7 @@ class ConditionalLERAnalyzer:
 
     * ``"logical_gap"``
     * ``"linearize_logicalgap"``
+    * ``"forced_gap_ml"``
 
     Methods
     -------

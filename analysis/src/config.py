@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 #: Metrics supported by :class:`ConditionalLERAnalyzer`.
 CONDITIONAL_LER_SUPPORTED_METRICS: frozenset[str] = frozenset(
-    {"logical_gap", "linearize_logicalgap"}
+    {"logical_gap", "linearize_logicalgap", "forced_gap_ml"}
 )
 
 
@@ -92,8 +92,9 @@ class ConditionalLERConfig:
     ----------
     metric_name:
         Continuous metric used as the x-axis (e.g. ``"logical_gap"``,
-        ``"linearize_logicalgap"``). May be a list to overlay multiple metrics.
-        Each metric must be one of :data:`CONDITIONAL_LER_SUPPORTED_METRICS`.
+        ``"linearize_logicalgap"``, ``"forced_gap_ml"``). May be a list to overlay
+        multiple metrics. Each metric must be one of
+        :data:`CONDITIONAL_LER_SUPPORTED_METRICS`.
     decoder_names:
         Subset of decoder names to include. ``None`` includes every decoder.
     filters:
@@ -117,7 +118,8 @@ class ConditionalLERConfig:
     convert_db:
         When ``True``, convert gap metric values to decibels before binning,
         rounding, and plotting: ``gap_dB = (10 / ln(10)) * gap``.
-        Only valid for ``"logical_gap"`` and ``"linearize_logicalgap"``.
+        Only valid for ``"logical_gap"``, ``"linearize_logicalgap"``, and
+        ``"forced_gap_ml"``.
     metric_labels:
         Mapping from internal metric name to a human-readable display label used in
         legend entries and axis labels (e.g. ``{"logical_gap": "BP decoder"}``).
