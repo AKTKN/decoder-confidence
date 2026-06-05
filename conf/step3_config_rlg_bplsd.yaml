@@ -1,0 +1,14 @@
+decoder: BP-LSD
+metric: reweighted_linearized_gap
+
+decoder_options:
+  # Number of BP iterations before LSD fallback
+  max_iter: 30
+  # BP scheduling: "flooding" or "min_sum"
+  bp_method: min_sum
+  # LSD order (0 = LSD-0, fastest; higher = more accurate)
+  lsd_order: 0
+
+metric_options:
+  # Ratio reweighting exponent: b > 1 (larger → more aggressive reweighting)
+  b: 2.0
