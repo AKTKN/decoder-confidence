@@ -500,6 +500,95 @@ def _build_mwpm_adapter(
     )
 
 
+@dataclass
+class RelayBpDecoderAdapter(DecoderAdapter):
+    _check_matrix: Any
+    _observables_matrix: Any
+    _priors: np.ndarray
+    _decoder_options: Mapping[str, Any]
+    _decoder: Any  # relay_bp.bp.RelayDecoderF64
+
+    @property
+    def priors(self) -> np.ndarray:
+        return self._priors
+
+    @property
+    def check_matrix(self) -> Any:
+        return self._check_matrix
+
+    @property
+    def observables_matrix(self) -> Any:
+        return self._observables_matrix
+
+    @property
+    def num_errors(self) -> int:
+        return int(self._check_matrix.shape[1])
+
+    def decode(self, syndrome: np.ndarray) -> np.ndarray:
+        result = self.decode_detailed_single(syndrome)
+        return np.asarray(result.decoding, dtype=np.bool_)
+
+    def decode_detailed_single(self, syndrome: np.ndarray) -> Any:
+        syndrome_u8 = np.asarray(syndrome, dtype=np.uint8)
+        return self._decoder.decode_detailed(syndrome_u8)
+
+    def set_priors(self, priors: np.ndarray) -> None:
+        self._priors = _clip_priors(priors)
+        self._rebuild()
+
+    def set_check_matrix(self, check_matrix: Any) -> None:
+        self._check_matrix = check_matrix
+        self._rebuild()
+
+    def set_observables(self, observables_matrix: Any) -> None:
+        self._observables_matrix = observables_matrix
+
+    def _rebuild(self) -> None:
+        self._decoder = _build_relay_decoder(
+            self._check_matrix, self._priors, self._decoder_options
+        )
+
+
+def _build_relay_decoder(
+    check_matrix: Any,
+    priors: np.ndarray,
+    decoder_options: Mapping[str, Any],
+) -> Any:
+    try:
+        from relay_bp.bp import RelayDecoderF64
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("relay_bp is required for relay-bp adapter") from exc
+
+    options = dict(decoder_options)
+    gamma_dist = options.get("gamma_dist_interval")
+    if gamma_dist is not None:
+        options["gamma_dist_interval"] = tuple(gamma_dist)
+
+    return RelayDecoderF64(
+        check_matrix=check_matrix,
+        error_priors=np.asarray(priors, dtype=np.float64),
+        **options,
+    )
+
+
+def _build_relay_bp_adapter(
+    dem: stim.DetectorErrorModel,
+    decoder_options: Mapping[str, Any],
+) -> RelayBpDecoderAdapter:
+    matrices = _dem_to_matrices_with_edge_priors(
+        dem, allow_undecomposed_hyperedges=True
+    )
+    priors = _clip_priors(matrices.priors)
+    decoder = _build_relay_decoder(matrices.check_matrix, priors, decoder_options)
+    return RelayBpDecoderAdapter(
+        _check_matrix=matrices.check_matrix,
+        _observables_matrix=matrices.observables_matrix,
+        _priors=priors,
+        _decoder_options=dict(decoder_options),
+        _decoder=decoder,
+    )
+
+
 def _normalize_decoder_name(name: str) -> str:
     return name.strip().upper().replace("_", "-")
 
@@ -520,5 +609,8 @@ def build_decoder_adapter(
     if normalized in {"VIBE-LSD", "VIBELSD"}:
         from decoder_confidence.decoding._vibelsd import build_vibelsd_adapter
         return build_vibelsd_adapter(dem, decoder_options)
+
+    if normalized == "RELAY-BP":
+        return _build_relay_bp_adapter(dem, decoder_options)
 
     raise ValueError(f"Unsupported base decoder for AR: {decoder_name}")

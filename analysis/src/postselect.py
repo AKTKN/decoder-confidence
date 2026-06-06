@@ -7,7 +7,7 @@ are shaded around each curve.
 
 Direction depends on the metric:
 
-* ``logical_gap``, ``linearize_logicalgap``, ``forced_gap_ml``: higher = more
+* ``logical_gap``, ``linearize_logicalgap``, ``reweighted_linearized_gap``, ``forced_gap_ml``: higher = more
   confident, so low-value shots are aborted preferentially (``direction="high"``).
 * ``cluster_llr``: lower = more confident, so high-value shots are aborted
   preferentially (``direction="low"``).
@@ -32,10 +32,15 @@ from analysis.src.data_manager import SimulationDataManager
 
 
 HIGH_CONFIDENCE_METRICS: frozenset[str] = frozenset(
-    {"logical_gap", "linearize_logicalgap", "forced_gap_ml"}
+    {
+        "logical_gap",
+        "linearize_logicalgap",
+        "reweighted_linearized_gap",
+        "forced_gap_ml",
+    }
 )
 LOW_CONFIDENCE_METRICS: frozenset[str] = frozenset({"cluster_llr"})
-BOOLEAN_METRICS: frozenset[str] = frozenset({"ar-pec", "ar-lec"})
+BOOLEAN_METRICS: frozenset[str] = frozenset({"ar-pec", "ar-lec", "argument_reweighting"})
 
 
 def _infer_direction(metric_name: str) -> str:
