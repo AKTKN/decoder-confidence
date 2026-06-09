@@ -17,7 +17,7 @@ ConditionalLERAnalyzer
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -174,6 +174,61 @@ def _validate_conditional_metric(metric_name: str) -> None:
         raise ValueError(
             f"metric_name '{metric_name}' is not supported for conditional LER. "
             f"Supported metrics: {supported}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Post-selection result
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PostselectionResult:
+    """Statistics from post-selection at a fixed metric threshold.
+
+    Attributes
+    ----------
+    abort_rate:
+        Fraction of shots aborted (discarded) by the threshold.
+    post_ler:
+        Logical error rate measured on the accepted (kept) shots.
+    original_ler:
+        Logical error rate without any post-selection.
+    reduction_rate:
+        ``post_ler / original_ler`` — values < 1 mean improvement.
+    n_accepted:
+        Number of shots kept after post-selection.
+    n_total:
+        Total number of shots before post-selection.
+    ci_low:
+        Wilson confidence-interval lower bound for *post_ler*.
+    ci_high:
+        Wilson confidence-interval upper bound for *post_ler*.
+    """
+
+    abort_rate: float
+    post_ler: float
+    original_ler: float
+    reduction_rate: float
+    n_accepted: int
+    n_total: int
+    ci_low: float
+    ci_high: float
+
+    def __repr__(self) -> str:
+        def _fmt(v: float) -> str:
+            return f"{v:.6g}" if not (v != v) else "nan"  # noqa: PLR0124
+
+        return (
+            f"PostselectionResult(\n"
+            f"  abort_rate={_fmt(self.abort_rate)},\n"
+            f"  post_ler={_fmt(self.post_ler)},\n"
+            f"  original_ler={_fmt(self.original_ler)},\n"
+            f"  reduction_rate={_fmt(self.reduction_rate)},\n"
+            f"  n_accepted={self.n_accepted},\n"
+            f"  n_total={self.n_total},\n"
+            f"  ci_low={_fmt(self.ci_low)},\n"
+            f"  ci_high={_fmt(self.ci_high)},\n"
+            f")"
         )
 
 
@@ -389,6 +444,156 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
             return []
 
         return np.unique(values).tolist()
+
+    def postselection_at_threshold(
+        self,
+        manager: SimulationDataManager,
+        config: PlotConfig,
+        threshold: float,
+        direction: str | None = None,
+        per_round: int | None = None,
+        alpha: float = 0.05,
+    ) -> PostselectionResult:
+        """Compute post-selection statistics at a fixed metric threshold.
+
+        Shots on the low-confidence side of *threshold* are aborted; the
+        remaining shots constitute the post-selected sample.  The method
+        returns the abort rate and the LER reduction rate so that the
+        caller can evaluate the quality of post-selection at any specific
+        operating point without sweeping an entire curve.
+
+        Parameters
+        ----------
+        manager:
+            Simulation data manager used to load parquet data.
+        config:
+            Plot configuration.  ``filters``, ``decoder_names``, and
+            ``batch_indices`` are used for data selection exactly as in
+            the existing plot methods; ``metric_name`` must be a single
+            metric string.
+        threshold:
+            The threshold value applied to the metric column.
+        direction:
+            Which side of the threshold to **keep**:
+
+            * ``"high"`` — keep shots with ``metric >= threshold``
+              (abort below; appropriate for gap-style metrics).
+            * ``"low"``  — keep shots with ``metric <= threshold``
+              (abort above; appropriate for ``cluster_llr``).
+
+            When *None*, the direction is inferred from the metric name
+            using the same rules as :class:`PostSelectionPlotter`.
+        per_round:
+            When an integer >= 1, all LER values are divided by this
+            number (LER per round).
+        alpha:
+            Wilson CI significance level for *post_ler* (default 0.05
+            → 95 % CI).
+
+        Returns
+        -------
+        PostselectionResult
+            Dataclass containing ``abort_rate``, ``post_ler``,
+            ``original_ler``, ``reduction_rate``, ``n_accepted``,
+            ``n_total``, ``ci_low``, ``ci_high``.
+
+        Raises
+        ------
+        ValueError
+            If ``config.metric_name`` contains more than one metric, or
+            if *direction* is invalid, or if the metric is a boolean
+            metric that does not support threshold-based post-selection.
+        """
+        from analysis.src.postselect import (
+            BOOLEAN_METRICS as _BOOLEAN_METRICS,
+            _infer_direction,
+        )
+
+        metric_names = normalize_metric_names(config.metric_name)
+        if len(metric_names) != 1:
+            raise ValueError(
+                "postselection_at_threshold supports a single metric_name only"
+            )
+        metric_name = metric_names[0]
+
+        if direction is None:
+            if metric_name in _BOOLEAN_METRICS:
+                raise ValueError(
+                    f"metric '{metric_name}' is a boolean metric; "
+                    "threshold-based post-selection is not supported. "
+                    "Use PostSelectionPlotter for boolean metrics."
+                )
+            direction = _infer_direction(metric_name)
+
+        if direction not in {"high", "low"}:
+            raise ValueError(
+                f"direction must be 'high' or 'low', got {direction!r}"
+            )
+
+        per_round = _normalize_per_round(per_round)
+        lf = manager.query(config)
+
+        needed = [metric_name, "is_logical_error"]
+        schema_names = set(lf.collect_schema().names())
+        existing = [c for c in needed if c in schema_names]
+        df = lf.select(existing).collect().drop_nulls(needed)
+
+        values = df[metric_name].to_numpy().astype(float)
+        is_error = df["is_logical_error"].to_numpy().astype(bool)
+        n_total = int(values.size)
+
+        _nan = float("nan")
+
+        if n_total == 0:
+            return PostselectionResult(
+                abort_rate=_nan, post_ler=_nan, original_ler=_nan,
+                reduction_rate=_nan, n_accepted=0, n_total=0,
+                ci_low=_nan, ci_high=_nan,
+            )
+
+        original_ler = float(is_error.mean())
+        if per_round is not None:
+            original_ler /= per_round
+
+        if direction == "high":
+            mask = values >= threshold
+        else:
+            mask = values <= threshold
+
+        n_accepted = int(mask.sum())
+        abort_rate = 1.0 - n_accepted / n_total
+
+        if n_accepted == 0:
+            return PostselectionResult(
+                abort_rate=abort_rate, post_ler=_nan,
+                original_ler=original_ler, reduction_rate=_nan,
+                n_accepted=0, n_total=n_total, ci_low=_nan, ci_high=_nan,
+            )
+
+        k_err = int(is_error[mask].sum())
+        post_ler = k_err / n_accepted
+        if per_round is not None:
+            post_ler /= per_round
+
+        ci_low_v, ci_high_v = wilson_ci(k_err, n_accepted, alpha=alpha)
+        ci_low_v = float(ci_low_v)
+        ci_high_v = float(ci_high_v)
+        if per_round is not None:
+            ci_low_v /= per_round
+            ci_high_v /= per_round
+
+        reduction_rate = post_ler / original_ler if original_ler > 0 else _nan
+
+        return PostselectionResult(
+            abort_rate=abort_rate,
+            post_ler=post_ler,
+            original_ler=original_ler,
+            reduction_rate=reduction_rate,
+            n_accepted=n_accepted,
+            n_total=n_total,
+            ci_low=ci_low_v,
+            ci_high=ci_high_v,
+        )
 
     # ------------------------------------------------------------------
     # Internal

@@ -3,6 +3,7 @@ from analysis.src.analyzers import (
     BooleanMetricAnalyzer,
     ConditionalLERAnalyzer,
     NumericMetricAnalyzer,
+    PostselectionResult,
 )
 from analysis.src.config import ConditionalLERConfig, PlotConfig
 from analysis.src.data_manager import SimulationDataManager
@@ -36,6 +37,7 @@ __all__ = [
     "NumericMetricAnalyzer",
     "BooleanMetricAnalyzer",
     "ConditionalLERAnalyzer",
+    "PostselectionResult",
     "PostSelectSpec",
     "PostSelectCurve",
     "PostSelectionPlotter",
