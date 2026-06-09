@@ -21,14 +21,35 @@ from decoder_confidence.decoding._linearize_logicalgap import (
 )
 from decoder_confidence.execution.models import DecoderBase, DecoderFactory
 
+# Per-shot case labels produced when get_all_failure_rate=True.
+# These classify the outcome of the two-stage decoding relative to the true
+# observables for each shot.
+#
+# K = num_obs  (number of logical observables; Stage 2 runs K decodes)
+#
+#   0: All K+1 solutions (1 from Stage 1, K from Stage 2) are logical errors.
+#   1: Stage 1 solution IS a logical error; at least one Stage 2 solution is NOT
+#      a logical error, AND that non-error solution was adopted as the final answer
+#      (it had the smallest weight).
+#   2: Stage 1 solution IS a logical error; at least one Stage 2 solution is NOT
+#      a logical error, BUT that non-error solution was NOT adopted as the final
+#      answer (it was not the minimum-weight solution overall).
+#   3: Stage 1 solution is NOT a logical error, but a Stage 2 solution with
+#      strictly smaller weight was found and adopted instead, overriding Stage 1.
+#  -1: Stage 1 solution is NOT a logical error and was adopted as the final answer
+#      (normal success; does not fall into any of cases 0-3).
+
 
 @dataclass(frozen=True)
 class ForcedGapMLOptions:
     """Options for the forced_gap_ml metric."""
 
+    get_all_failure_rate: bool = False
+
 
 def _parse_forced_gap_ml_options(metric_options: Mapping[str, Any]) -> ForcedGapMLOptions:
-    return ForcedGapMLOptions()
+    get_all_failure_rate = bool(metric_options.get("get_all_failure_rate", False))
+    return ForcedGapMLOptions(get_all_failure_rate=get_all_failure_rate)
 
 
 @dataclass
@@ -56,7 +77,12 @@ class ForcedGapMLDecoder(DecoderBase):
         self._num_errors: int = self.adapter.num_errors
         self._weights: np.ndarray = _weights_from_priors(self._base_priors)
 
-    def decode(self, syndromes: np.ndarray) -> DecodingResult:
+    def decode(
+        self,
+        syndromes: np.ndarray,
+        *,
+        true_obs: np.ndarray | None = None,
+    ) -> DecodingResult:
         syndromes = np.asarray(syndromes, dtype=int)
         if syndromes.ndim == 1:
             syndromes = syndromes.reshape(1, -1)
@@ -69,6 +95,14 @@ class ForcedGapMLDecoder(DecoderBase):
         predictions = np.zeros((num_shots, num_obs), dtype=np.bool_)
         gap = np.full((num_shots,), np.nan, dtype=float)
         obs_flip_idx: list[list[int]] = []
+
+        compute_cases = self.options.get_all_failure_rate and true_obs is not None
+        if compute_cases:
+            true_obs_arr = np.asarray(true_obs, dtype=np.bool_)
+            if true_obs_arr.ndim == 1 and num_obs == 1:
+                true_obs_arr = true_obs_arr.reshape(-1, 1)
+            # case_labels: -1 = normal success (stage1 correct and adopted)
+            case_labels = np.full(num_shots, -1, dtype=np.int8)
 
         for shot in range(num_shots):
             syndrome = syndromes[shot]
@@ -83,6 +117,7 @@ class ForcedGapMLDecoder(DecoderBase):
 
             # Collect all solutions: list of (weight, logical_class)
             all_solutions: list[tuple[float, np.ndarray]] = [(w1, l1)]
+            stage2_logicals: list[np.ndarray] = []
 
             if num_obs > 0:
                 # --- Stage 2: one decode per observable, forcing it to flip ---
@@ -98,6 +133,7 @@ class ForcedGapMLDecoder(DecoderBase):
 
                     l2 = _logical_from_correction(self._observables, c2)
                     w2_i = float(self._weights @ c2.astype(int))
+                    stage2_logicals.append(l2)
                     all_solutions.append((w2_i, l2))
 
                 # Restore original state for the next shot
@@ -122,9 +158,33 @@ class ForcedGapMLDecoder(DecoderBase):
             diff = np.asarray(l1, dtype=int) ^ np.asarray(ml_logical, dtype=int)
             obs_flip_idx.append(list(np.where(diff)[0]))
 
+            if compute_cases:
+                obs_shot = true_obs_arr[shot]
+                stage1_is_error = bool(np.any(l1 != obs_shot))
+                final_is_error = bool(np.any(ml_logical != obs_shot))
+                stage1_adopted = np.array_equal(l1, ml_logical)
+                any_stage2_correct = any(
+                    not np.any(l2 != obs_shot) for l2 in stage2_logicals
+                )
+
+                if stage1_is_error:
+                    if not any_stage2_correct:
+                        case_labels[shot] = 0
+                    elif not final_is_error:
+                        case_labels[shot] = 1
+                    else:
+                        case_labels[shot] = 2
+                elif not stage1_adopted:
+                    case_labels[shot] = 3
+                # else -1 (default): stage1 correct and adopted
+
+        metrics: dict[str, Any] = {"forced_gap_ml": gap}
+        if compute_cases:
+            metrics["forced_gap_ml_case"] = case_labels
+
         return DecodingResult(
             predictions=predictions,
-            metrics={"forced_gap_ml": gap},
+            metrics=metrics,
             obs_flip_idx=obs_flip_idx,
         )
 

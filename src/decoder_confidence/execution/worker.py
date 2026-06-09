@@ -37,6 +37,7 @@ class WorkerState:
     decoder: Any
     decoder_name: str
     output_dir: Path
+    decoder_accepts_true_obs: bool = False
 
 
 _STATE: WorkerState | None = None
@@ -86,6 +87,11 @@ def init_worker(config: WorkerConfig) -> None:
     decoder = _build_decoder(config.decoder_factory, dem)
     decoder_name = decoder.__class__.__name__
 
+    try:
+        decoder_accepts_true_obs = "true_obs" in inspect.signature(decoder.decode).parameters
+    except (TypeError, ValueError):
+        decoder_accepts_true_obs = False
+
     _STATE = WorkerState(
         dem=dem,
         num_detectors=num_detectors,
@@ -94,6 +100,7 @@ def init_worker(config: WorkerConfig) -> None:
         decoder=decoder,
         decoder_name=decoder_name,
         output_dir=config.output_dir,
+        decoder_accepts_true_obs=decoder_accepts_true_obs,
     )
 
 
@@ -211,7 +218,10 @@ def run_task(task: SimulationTask) -> WorkerResult:
         dets = data[:, : _STATE.num_detectors]
         obs = data[:, _STATE.num_detectors :]
 
-        result = _STATE.decoder.decode(dets)
+        if _STATE.decoder_accepts_true_obs and _STATE.num_observables > 0:
+            result = _STATE.decoder.decode(dets, true_obs=obs)
+        else:
+            result = _STATE.decoder.decode(dets)
         predictions = _normalize_predictions(
             result.predictions, task.num_shots, _STATE.num_observables
         )

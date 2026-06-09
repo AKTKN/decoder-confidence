@@ -17,6 +17,16 @@ from analysis.src.relative_improvement import (
     RelImprovSpec,
     RelativeImprovementPlotter,
 )
+from analysis.src.metric_correlation import (
+    MetricPairConfig,
+    concordance_correlation_coefficient,
+    plot_metric_scatter,
+)
+from analysis.src.metric_spearman import (
+    SpearmanConfig,
+    compute_spearman_matrix,
+    plot_spearman_heatmap,
+)
 
 __all__ = [
     "PlotConfig",
@@ -33,4 +43,10 @@ __all__ = [
     "postselect_curve_ar",
     "RelImprovSpec",
     "RelativeImprovementPlotter",
+    "MetricPairConfig",
+    "concordance_correlation_coefficient",
+    "plot_metric_scatter",
+    "SpearmanConfig",
+    "compute_spearman_matrix",
+    "plot_spearman_heatmap",
 ]
