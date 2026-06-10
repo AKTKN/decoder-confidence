@@ -75,10 +75,6 @@ class MetricPairConfig:
         scatter series (e.g. ``["d", "p"]``).
     batch_indices :
         Restrict to specific batch indices. ``None`` loads all batches.
-    x_label :
-        Override for the x-axis label. Defaults to ``x_metric``.
-    y_label :
-        Override for the y-axis label. Defaults to ``y_metric``.
     use_negative_gap :
         When ``True``, shots where the respective decoder made a logical error
         are plotted with their metric value negated (x errors negate x values,
@@ -97,8 +93,6 @@ class MetricPairConfig:
     y_decoder_names: list[str] | None = None
     group_by: list[str] = field(default_factory=list)
     batch_indices: list[int] | None = None
-    x_label: str | None = None
-    y_label: str | None = None
     use_negative_gap: bool = False
     report_confidence_statistics: bool = False
 
@@ -280,8 +274,6 @@ def plot_metric_scatter(
     scatter_kw = dict(scatter_kw or {})
     x_col = config.x_metric
     y_col = config.y_metric
-    x_label = config.x_label or config.x_metric
-    y_label = config.y_label or config.y_metric
 
     df = _load_and_join(manager, config)
     ccc_dict: dict[tuple, float] = {}
@@ -344,7 +336,6 @@ def plot_metric_scatter(
                     f" [{label_str}]"
                 )
                 print(_confidence_probability_table(partitions[key_vals]))
-        ax.legend()
 
     # y = x reference line spanning the data range (uses transformed values)
     x_all, y_all = _xy_from_part(df)
@@ -352,8 +343,5 @@ def plot_metric_scatter(
         all_vals = np.concatenate([x_all, y_all])
         vmin, vmax = float(all_vals.min()), float(all_vals.max())
         ax.plot([vmin, vmax], [vmin, vmax], "k--", linewidth=1, zorder=0)
-
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(y_label)
 
     return ax, ccc_dict

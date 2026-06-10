@@ -285,7 +285,4 @@ def plot_spearman_heatmap(
             ax.text(j, i, text, ha="center", va="center",
                     fontsize=annot_fontsize, color=text_color)
 
-    ax.set_xlabel("Metric")
-    ax.set_ylabel("Metric")
-
     return ax, corr_matrix, labels

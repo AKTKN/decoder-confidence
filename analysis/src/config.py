@@ -61,14 +61,8 @@ class PlotConfig:
         ``batch=N`` suffix in parquet filenames). ``None`` loads all available batches.
     metric_labels:
         Mapping from internal metric name to a human-readable display label used in
-        legend entries and axis labels (e.g. ``{"linearize_logicalgap": "BP+OSD"}``).
+        legend entries (e.g. ``{"linearize_logicalgap": "BP+OSD"}``).
         Metric names absent from the mapping fall back to the raw name.
-    xlabel:
-        Override for the x-axis label.  When ``None`` (default) the label is derived
-        automatically from the metric name / ``metric_labels``.
-    ylabel:
-        Override for the y-axis label.  When ``None`` (default) the label is
-        ``"Frequency"``.
     """
 
     metric_name: str | List[str]
@@ -80,8 +74,6 @@ class PlotConfig:
     extra_options: Dict[str, Any] = field(default_factory=dict)
     batch_indices: Optional[List[int]] = None
     metric_labels: Dict[str, str] = field(default_factory=dict)
-    xlabel: Optional[str] = None
-    ylabel: Optional[str] = None
 
 
 @dataclass
@@ -110,6 +102,12 @@ class ConditionalLERConfig:
     get_fitting_plot:
         When ``True``, :meth:`~ConditionalLERAnalyzer.plot_fitting` will
         draw a log-odds scatter with a linear fit line.
+    show_sigmoid_fit:
+        When ``True``, :meth:`~ConditionalLERAnalyzer.plot_conditional_ler`
+        additionally draws a fitted curve ``y(g) = 1 / (1 + exp(k * g))``,
+        where ``k`` is obtained from an origin-constrained (``l = 0``) least
+        squares fit of ``k * g = log((1 - y) / y)`` to the binned conditional
+        LER values.
     batch_indices:
         Restrict loading to specific batch indices. ``None`` loads all batches.
     round_digits:
@@ -122,13 +120,8 @@ class ConditionalLERConfig:
         ``"forced_gap_ml"``.
     metric_labels:
         Mapping from internal metric name to a human-readable display label used in
-        legend entries and axis labels (e.g. ``{"logical_gap": "BP decoder"}``).
+        legend entries (e.g. ``{"logical_gap": "BP decoder"}``).
         Metric names absent from the mapping fall back to the raw name.
-    xlabel:
-        Override for the x-axis label.  When ``None`` the label is derived
-        automatically from the metric name / ``metric_labels``.
-    ylabel:
-        Override for the y-axis label.  When ``None`` the default label is used.
     """
 
     metric_name: str | List[str]
@@ -138,9 +131,8 @@ class ConditionalLERConfig:
     bins: Optional[int] = None
     alpha: float = 0.05
     get_fitting_plot: bool = False
+    show_sigmoid_fit: bool = False
     batch_indices: Optional[List[int]] = None
     round_digits: Optional[int] = None
     convert_db: bool = False
     metric_labels: Dict[str, str] = field(default_factory=dict)
-    xlabel: Optional[str] = None
-    ylabel: Optional[str] = None

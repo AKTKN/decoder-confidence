@@ -85,6 +85,7 @@ class PostSelectSpec:
     batch_indices: Optional[List[int]] = None
     direction: Optional[str] = None
     label_prefix: Optional[str] = None
+    round_digit: Optional[int] = None
     threshold_mode: str = "continuous"
     grid_scale: str = "linear"
 
@@ -335,14 +336,6 @@ class PostSelectionPlotter:
                 spec, ax, num_points, alpha, shade_alpha, plot_kw, reduction_rate
             )
 
-        ax.set_xlabel("Abort rate")
-        if reduction_rate:
-            ax.set_ylabel("LER reduction rate (post-LER / original-LER)")
-        else:
-            ax.set_ylabel("Post-selected logical error rate")
-        ax.set_xlim(0.0, 1.0)
-        ax.legend()
-
     def _plot_spec(
         self,
         spec: PostSelectSpec,
@@ -412,6 +405,10 @@ class PostSelectionPlotter:
         else:
             sub = df.drop_nulls([spec.metric_name, "is_logical_error"])
             values = sub[spec.metric_name].to_numpy().astype(float)
+
+            if spec.round_digit is not None:
+                values = np.round(values, spec.round_digit)
+                
             is_error = sub["is_logical_error"].to_numpy().astype(bool)
             if spec.threshold_mode == "unique":
                 curve = postselect_curve_unique_thresholds(

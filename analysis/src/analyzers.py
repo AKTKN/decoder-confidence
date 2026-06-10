@@ -357,18 +357,6 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
                         ax, values, bins, alpha_ci, shade_alpha, scatter_kw, label=label
                     )
 
-        if multi_metric and not partition_keys:
-            ax.legend()
-
-        if config.xlabel is not None:
-            ax.set_xlabel(config.xlabel)
-        else:
-            if not multi_metric:
-                ax.set_xlabel(config.metric_labels.get(metric_names[0], metric_names[0]))
-            else:
-                ax.set_xlabel("Metric value")
-        ax.set_ylabel(config.ylabel if config.ylabel is not None else "Frequency")
-
     def logical_error_rate(
         self,
         manager: SimulationDataManager,
@@ -731,8 +719,6 @@ class BooleanMetricAnalyzer(AbstractMetricAnalyzer):
                 )
                 ax.set_xticks([0])
                 ax.set_xticklabels(["all"])
-                ax.set_ylabel("Accept rate")
-                ax.set_ylim(0, 1)
                 continue
 
             partitions: dict[tuple, pl.DataFrame] = df.partition_by(
@@ -774,11 +760,6 @@ class BooleanMetricAnalyzer(AbstractMetricAnalyzer):
             )
             ax.set_xticks(x_arr)
             ax.set_xticklabels(labels, rotation=45, ha="right")
-            ax.set_ylabel("Accept rate")
-            ax.set_ylim(0, 1)
-
-        if multi_metric and not partition_keys:
-            ax.legend()
 
     def logical_error_rate(
         self,
@@ -828,7 +809,10 @@ class ConditionalLERAnalyzer:
     Methods
     -------
     plot_conditional_ler(lf, config, ax)
-        Main LER scatter with CI shading.
+        Main LER scatter with CI shading.  When ``config.show_sigmoid_fit``
+        is ``True``, also overlays a fitted curve
+        ``y(g) = 1 / (1 + exp(k * g))`` (origin-constrained, ``l = 0``)
+        derived from the log-odds of the binned proportions.
     plot_fitting(lf, config, ax)
         Log-odds scatter with linear fit (call when ``config.get_fitting_plot``
         is ``True``).
@@ -884,26 +868,6 @@ class ConditionalLERAnalyzer:
                         ax, partitions[key_vals], metric_config, label=label, style=style
                     )
 
-        if config.group_by or multi_metric:
-            ax.legend()
-
-        if config.xlabel is not None:
-            ax.set_xlabel(config.xlabel)
-        else:
-            if not multi_metric:
-                ax.set_xlabel(config.metric_labels.get(metric_names[0], metric_names[0]))
-            else:
-                ax.set_xlabel("Metric value")
-
-        if config.ylabel is not None:
-            ax.set_ylabel(config.ylabel)
-        else:
-            if not multi_metric:
-                display0 = config.metric_labels.get(metric_names[0], metric_names[0])
-                ax.set_ylabel(f"P(logical error | {display0})")
-            else:
-                ax.set_ylabel("P(logical error | metric)")
-
     def plot_fitting(
         self,
         lf: pl.LazyFrame,
@@ -954,22 +918,6 @@ class ConditionalLERAnalyzer:
                         ax, partitions[key_vals], metric_config, label=label, style=style
                     )
 
-        if config.group_by or multi_metric:
-            ax.legend()
-
-        if config.xlabel is not None:
-            ax.set_xlabel(config.xlabel)
-        else:
-            if not multi_metric:
-                ax.set_xlabel(config.metric_labels.get(metric_names[0], metric_names[0]))
-            else:
-                ax.set_xlabel("Metric value")
-
-        ax.set_ylabel(
-            config.ylabel if config.ylabel is not None
-            else r"$\log\!\left(\dfrac{1 - y}{y}\right)$"
-        )
-
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -1018,10 +966,62 @@ class ConditionalLERAnalyzer:
             bstats.centers[valid], bstats.proportions[valid],
             label=label, **scatter_kw,
         )
-        shade_ci(
-            ax, bstats.centers, bstats.ci_low, bstats.ci_high,
-            color=_scatter_color(sc), alpha=0.2,
+        color = _scatter_color(sc)
+        # shade_ci(
+        #     ax, bstats.centers, bstats.ci_low, bstats.ci_high,
+        #     color=color, alpha=0.2,
+        # )
+
+        centers = bstats.centers[valid]
+        p = bstats.proportions[valid]
+
+        yerr_lower = np.clip(p - bstats.ci_low[valid], 0, None)
+        yerr_upper = np.clip(bstats.ci_high[valid] - p, 0, None)
+
+        ax.errorbar(
+            centers,
+            p,
+            yerr=[yerr_lower, yerr_upper],
+            fmt='none',
+            color=color,
+            capsize=3,
+            alpha=0.8,
         )
+
+        if config.show_sigmoid_fit:
+            self._plot_sigmoid_fit_curve(ax, bstats, color, label)
+
+    def _plot_sigmoid_fit_curve(
+        self,
+        ax: plt.Axes,
+        bstats: BinnedProportions,
+        color: Any,
+        label: str | None = None,
+    ) -> None:
+        """Overlay y(g) = 1 / (1 + exp(k * g)) fitted with l = 0 (origin-constrained).
+
+        ``k`` minimises ``sum((k * g - log((1 - p) / p)) ** 2)`` over the
+        binned conditional LER values ``p``, i.e. ``k = sum(g * z) / sum(g * g)``
+        where ``z = log((1 - p) / p)``.
+        """
+        p = bstats.proportions
+        valid = (~np.isnan(p)) & (p > 0.0) & (p < 1.0)
+        g = bstats.centers[valid]
+        if g.size < 1:
+            return
+
+        z = np.log((1.0 - p[valid]) / p[valid])
+
+        k, l = np.polyfit(g, z, 1)
+
+        g_line = np.linspace(float(g.min()), float(g.max() * 1.5), 300)
+
+        y_line = 1.0 / (
+            1.0 + np.exp(k * g_line + l)
+        )
+
+        fit_label = f"fit ({label}, k={k:.3f}, l={l:.3f})" if label else f"fit (k={k:.3f}, l={l:.3f})"
+        ax.plot(g_line, y_line, linestyle="--", color=color, label=fit_label)
 
     def _plot_fitting_group(
         self,
@@ -1068,7 +1068,7 @@ class ConditionalLERAnalyzer:
             z_high = np.log((1.0 - ci_low_sel) / ci_low_sel)
             shade_ci(ax, g_ci, z_low, z_high, color=color, alpha=0.2)
 
-        g_line = np.linspace(float(g.min()), float(g.max()), 300)
+        g_line = np.linspace(float(g.min()), float(g.max() * 1.5), 300)
         fit_label = (
             f"fit ({label + ', ' if label else ''}k={k:.3f}, l={l:.3f})"
         )

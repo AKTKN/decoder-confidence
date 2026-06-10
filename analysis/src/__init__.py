@@ -28,6 +28,34 @@ from analysis.src.metric_spearman import (
     compute_spearman_matrix,
     plot_spearman_heatmap,
 )
+from analysis.src.case_histogram import (
+    ForcedGapMLCaseConfig,
+    ForcedGapMLCaseAnalyzer,
+    GapCaseHistogramConfig,
+    CaseScatterConfig,
+    CASE_TICK_LABELS,
+    CASE_DESCRIPTIONS,
+    case_description_text,
+)
+from analysis.src.figure_style import (
+    MultiStyleFigureExporter,
+    apply_paper_style,
+    set_tab10_colors,
+    finalize_axes,
+    TAB10_COLORS,
+)
+from analysis.src.plot_utils import (
+    PlotOutputOptions,
+    finalize_plot,
+    draw_numeric_distribution,
+    draw_boolean_distribution,
+    draw_conditional_ler,
+    draw_conditional_ler_fitting,
+    draw_post_selection,
+    draw_relative_improvement,
+    draw_case_histogram,
+    draw_case_scatter,
+)
 
 __all__ = [
     "PlotConfig",
@@ -51,4 +79,25 @@ __all__ = [
     "SpearmanConfig",
     "compute_spearman_matrix",
     "plot_spearman_heatmap",
+    "ForcedGapMLCaseConfig",
+    "ForcedGapMLCaseAnalyzer",
+    "CaseScatterConfig",
+    "CASE_TICK_LABELS",
+    "CASE_DESCRIPTIONS",
+    "case_description_text",
+    "MultiStyleFigureExporter",
+    "apply_paper_style",
+    "set_tab10_colors",
+    "finalize_axes",
+    "TAB10_COLORS",
+    "PlotOutputOptions",
+    "finalize_plot",
+    "draw_numeric_distribution",
+    "draw_boolean_distribution",
+    "draw_conditional_ler",
+    "draw_conditional_ler_fitting",
+    "draw_post_selection",
+    "draw_relative_improvement",
+    "draw_case_histogram",
+    "draw_case_scatter",
 ]

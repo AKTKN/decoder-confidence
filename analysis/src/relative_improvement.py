@@ -234,12 +234,6 @@ class RelativeImprovementPlotter:
                 )
 
         ax.axhline(0.0, color="gray", linestyle="--", linewidth=0.8)
-        ax.set_xlabel("Abort rate")
-        ax.set_ylabel(
-            r"$\log_{10}\!\left(\rho_\mathrm{base}\,/\,\rho_\mathrm{metric}\right)$"
-        )
-        ax.set_xlim(0.0, 1.0)
-        ax.legend()
 
     # ------------------------------------------------------------------
 
