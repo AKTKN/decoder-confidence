@@ -11,7 +11,7 @@ from typing import Any, Mapping, Sequence
 import stim
 
 from decoder_confidence.decoding.decoder_factory import DecoderConfigInfo
-from decoder_confidence.execution.models import WorkerResult
+from decoder_confidence.execution.models import IncompleteRange, WorkerResult
 
 
 @dataclass(frozen=True)
@@ -96,6 +96,22 @@ def _check_matrix_shape(
     return int(check_matrix.shape[0]), int(check_matrix.shape[1])
 
 
+def _incomplete_entries(
+    incomplete_ranges: Sequence[IncompleteRange], reason: str
+) -> list[dict[str, Any]] | None:
+    entries = [
+        {
+            "shot_id_start": r.shot_id_start,
+            "shot_id_end": r.shot_id_end,
+            "batch_id": r.batch_id,
+            "message": r.message,
+        }
+        for r in incomplete_ranges
+        if r.reason == reason
+    ]
+    return entries or None
+
+
 def build_decoding_metadata(
     *,
     decoder_info: DecoderConfigInfo,
@@ -106,6 +122,7 @@ def build_decoding_metadata(
     end_time: datetime,
     results: Sequence[WorkerResult],
     metrics_recorded: Sequence[str],
+    incomplete_ranges: Sequence[IncompleteRange] = (),
 ) -> dict[str, Any]:
     dem = stim.DetectorErrorModel.from_file(str(dem_path))
     num_detectors, num_observables = _get_dem_counts(dem)
@@ -120,6 +137,9 @@ def build_decoding_metadata(
     check_rows, check_cols = _check_matrix_shape(dem, decoder_info.decoder_name)
     random_seed = decoder_info.decoder_options.get("random_seed")
     solver_options = decoder_info.decoder_options.get("solver_options")
+    incomplete_shots = sum(
+        r.shot_id_end - r.shot_id_start for r in incomplete_ranges
+    )
 
     return {
         "schema_version": 1,
@@ -157,14 +177,15 @@ def build_decoding_metadata(
             "executed_shots": summary.ok_shots,
             "skipped_shots": summary.skipped_shots,
             "error_shots": summary.error_shots,
+            "incomplete_shots": incomplete_shots,
             "total_shots": total_shots,
             "peak_memory_mb": _peak_rss_mb(),
         },
         "algorithm_status": {
             "solver_options": solver_options,
-            "timeouts": None,
+            "timeouts": _incomplete_entries(incomplete_ranges, "timeout"),
             "nonconverged": None,
-            "failed": None,
+            "failed": _incomplete_entries(incomplete_ranges, "error"),
         },
     }
 

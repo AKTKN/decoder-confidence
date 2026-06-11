@@ -74,6 +74,55 @@ class WorkerResult:
 
 
 @dataclass(frozen=True)
+class IncompleteRange:
+    """A shot_id range that was never successfully produced.
+
+    Persisted so shot_id numbering stays consistent/comparable across
+    experiments even when a task is abandoned (timeout) or fails after
+    retries — the gap is recorded rather than silently dropped/renumbered.
+    """
+
+    shot_id_start: int  # inclusive
+    shot_id_end: int  # exclusive
+    batch_id: int
+    dets_path: str
+    reason: str  # "timeout" | "error"
+    message: str | None = None
+    attempts: int = 1
+
+    @staticmethod
+    def from_task(
+        task: "SimulationTask",
+        *,
+        reason: str,
+        message: str | None = None,
+        attempts: int = 1,
+    ) -> "IncompleteRange":
+        start = task.shot_id_offset + task.start_shot_index
+        return IncompleteRange(
+            shot_id_start=start,
+            shot_id_end=start + task.num_shots,
+            batch_id=task.batch_id,
+            dets_path=str(task.dets_path),
+            reason=reason,
+            message=message,
+            attempts=attempts,
+        )
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    """Result of running a batch of SimulationTasks."""
+
+    results: list[WorkerResult]
+    incomplete: list["IncompleteRange"]
+
+
+class IncompleteTasksError(RuntimeError):
+    """Raised after outputs have been written when some tasks never completed."""
+
+
+@dataclass(frozen=True)
 class WorkerConfig:
     dem_path: Path
     output_dir: Path
@@ -96,3 +145,7 @@ class ExecutionConfig:
     verbose: bool = False
     max_chunk_files: int | None = 1000
     merge_chunk_group_size: int | None = None
+    timeout_multiplier: float = 10.0
+    min_task_timeout_s: float = 60.0
+    max_task_retries: int = 1
+    maxtasksperchild: int | None = 50

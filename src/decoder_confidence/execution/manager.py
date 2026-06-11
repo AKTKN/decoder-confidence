@@ -14,15 +14,20 @@ from decoder_confidence.execution._execution_utils import (
     rss_mb,
     select_core_ids,
 )
-from decoder_confidence.execution.batching import estimate_shots_per_task
+from decoder_confidence.execution.batching import (
+    estimate_shots_per_task,
+    estimate_task_timeout_s,
+)
 from decoder_confidence.execution.models import (
     DetsFileInfo,
     ExecutionConfig,
+    RunOutcome,
     SharedEnvDecoderFactory,
     SimulationTask,
     WorkerConfig,
     WorkerResult,
 )
+from decoder_confidence.execution.pool_runner import run_pool_tasks
 from decoder_confidence.execution.worker import init_worker, run_task
 
 # Re-exported for backward compatibility so existing imports keep working.
@@ -33,7 +38,7 @@ __all__ = [
 ]
 
 
-def _run_manager_multiprocess(config: ExecutionConfig) -> list[WorkerResult]:
+def _run_manager_multiprocess(config: ExecutionConfig) -> RunOutcome:
     """Multiprocessing execution path for decoders without session constraints."""
     if config.num_workers < 1:
         raise ValueError(f"num_workers must be >= 1 but got {config.num_workers}")
@@ -74,7 +79,6 @@ def _run_manager_multiprocess(config: ExecutionConfig) -> list[WorkerResult]:
         shot_id_offset=probe_info.shot_id_offset,
     )
 
-    results: list[WorkerResult] = []
     start_time = time.perf_counter()
     completed_tasks = 0
     ok_count = 0
@@ -120,7 +124,10 @@ def _run_manager_multiprocess(config: ExecutionConfig) -> list[WorkerResult]:
 
     ctx = mp.get_context("spawn")
     with ctx.Pool(
-        processes=config.num_workers, initializer=init_worker, initargs=(worker_config,)
+        processes=config.num_workers,
+        initializer=init_worker,
+        initargs=(worker_config,),
+        maxtasksperchild=config.maxtasksperchild,
     ) as pool:
         # Run probe inside the already-initialised pool so workers are spawned
         # only once.  Using a separate Pool for the probe (as before) caused a
@@ -143,6 +150,17 @@ def _run_manager_multiprocess(config: ExecutionConfig) -> list[WorkerResult]:
             min_shots=1,
             max_shots=config.max_shots_per_task,
         )
+        task_timeout_s = estimate_task_timeout_s(
+            probe_shots,
+            probe_result.duration_s,
+            shots_per_task,
+            timeout_multiplier=config.timeout_multiplier,
+            min_task_timeout_s=config.min_task_timeout_s,
+        )
+        if config.verbose:
+            print(
+                f"shots_per_task={shots_per_task} task_timeout_s={task_timeout_s:.1f}"
+            )
 
         tasks: list[SimulationTask] = []
         batch_id = 1
@@ -164,8 +182,8 @@ def _run_manager_multiprocess(config: ExecutionConfig) -> list[WorkerResult]:
 
         total_tasks = len(tasks)
 
-        for result in pool.imap_unordered(run_task, tasks, chunksize=1):
-            results.append(result)
+        def _on_result(result: WorkerResult) -> None:
+            nonlocal completed_tasks, ok_count, skipped_count, error_count, ok_duration_sum
             completed_tasks += 1
             if result.status == "ok":
                 ok_count += 1
@@ -191,17 +209,22 @@ def _run_manager_multiprocess(config: ExecutionConfig) -> list[WorkerResult]:
                     f"rss={rss_mb():.1f}MB elapsed={elapsed:.1f}s"
                 )
 
-    errors = [r for r in results if r.status == "error"]
-    if errors:
-        messages = "\n".join(
-            f"batch_id={r.batch_id} msg={r.message}" for r in errors
+        outcome = run_pool_tasks(
+            tasks,
+            pool=pool,
+            ctx=ctx,
+            worker_config=worker_config,
+            num_workers=config.num_workers,
+            maxtasksperchild=config.maxtasksperchild,
+            task_timeout_s=task_timeout_s,
+            max_retries=config.max_task_retries,
+            on_result=_on_result,
         )
-        raise RuntimeError(f"One or more tasks failed:\n{messages}")
 
-    return results
+    return outcome
 
 
-def run_manager(config: ExecutionConfig) -> list[WorkerResult]:
+def run_manager(config: ExecutionConfig) -> RunOutcome:
     """Run decoding simulation tasks, routing to the appropriate executor.
 
     - ``SharedEnvDecoderFactory`` (e.g. ILP/Gurobi) → threaded executor

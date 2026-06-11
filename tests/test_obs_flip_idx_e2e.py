@@ -280,6 +280,7 @@ def test_obs_flip_idx_pipeline_output(tmp_path):
     _skip_if_missing()
 
     from decoder_confidence.decoding.__main__ import main as decoding_main
+    from decoder_confidence.execution.models import IncompleteTasksError
 
     data_dir = BB4_DATA.parent
 
@@ -299,6 +300,8 @@ def test_obs_flip_idx_pipeline_output(tmp_path):
     try:
         rc = decoding_main(args)
     except RuntimeError as exc:
+        if isinstance(exc, IncompleteTasksError):
+            raise
         pytest.skip(str(exc))
     assert rc == 0
 

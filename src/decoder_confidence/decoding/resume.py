@@ -21,11 +21,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 import polars as pl
 import stim
 
 from decoder_confidence.decoding.decoder_factory import load_decoder_factory
+from decoder_confidence.decoding.incomplete import (
+    INCOMPLETE_SHOTS_FILENAME,
+    write_incomplete_shots,
+)
 from decoder_confidence.decoding.metadata import build_decoding_metadata, write_metadata
 from decoder_confidence.execution._execution_utils import (
     bytes_per_shot_count,
@@ -36,13 +41,20 @@ from decoder_confidence.execution._execution_utils import (
     rss_mb,
     select_core_ids,
 )
-from decoder_confidence.execution.batching import estimate_shots_per_task
+from decoder_confidence.execution.batching import (
+    estimate_shots_per_task,
+    estimate_task_timeout_s,
+)
 from decoder_confidence.execution.models import (
+    IncompleteRange,
+    IncompleteTasksError,
+    RunOutcome,
     SharedEnvDecoderFactory,
     SimulationTask,
     WorkerConfig,
     WorkerResult,
 )
+from decoder_confidence.execution.pool_runner import run_pool_tasks
 from decoder_confidence.execution.threaded_manager import _run_task as _threaded_run_task
 from decoder_confidence.execution.worker import init_worker, run_task
 from decoder_confidence.varint import write_obs_flip_idx_file
@@ -242,21 +254,29 @@ def _cleanup_intermediate(chunk_dir: Path) -> None:
 # ── Task execution ─────────────────────────────────────────────────────────────
 
 def _chunk_loop(
-    result_iter,
+    result_iter: Iterable[tuple[SimulationTask, WorkerResult]],
     *,
     total_tasks: int,
     chunk_dir: Path,
     verbose: bool,
     max_chunk_files: int | None,
     merge_chunk_group_size: int | None,
-) -> list[WorkerResult]:
-    """Consume results, track progress, merge chunks into parts as needed."""
+) -> RunOutcome:
+    """Consume (task, result) pairs, track progress, merge chunks into parts.
+
+    Used by the threaded resume path only (Priority 2: a failed task is
+    recorded as an ``IncompleteRange`` after a single attempt, with no
+    retry/timeout -- see ``threaded_manager.run_manager_threaded`` for why
+    Priority 3 does not apply to ``ThreadPoolExecutor``-based execution).
+    """
     merge_group_size = resolve_merge_group_size(max_chunk_files, merge_chunk_group_size)
     part_dir = chunk_dir / "parts"
     part_index = next_part_index(part_dir)
     pending: list[Path] = []
     seen: set[Path] = set()
     results: list[WorkerResult] = []
+    incomplete: list[IncompleteRange] = []
+    completed = 0
     ok_count = skipped_count = error_count = 0
     ok_dur_sum = 0.0
     wall_start = time.perf_counter()
@@ -286,15 +306,20 @@ def _chunk_loop(
                     print(f"[resume] merge failed: {exc}")
                 break
 
-    for result in result_iter:
-        results.append(result)
+    for task, result in result_iter:
+        completed += 1
         if result.status == "ok":
             ok_count += 1
             ok_dur_sum += result.duration_s
+            results.append(result)
         elif result.status == "skipped":
             skipped_count += 1
+            results.append(result)
         else:
             error_count += 1
+            incomplete.append(
+                IncompleteRange.from_task(task, reason="error", message=result.message)
+            )
         if result.status in {"ok", "skipped"}:
             _enqueue(result.output_path)
         if verbose:
@@ -302,19 +327,13 @@ def _chunk_loop(
             avg = ok_dur_sum / ok_count if ok_count else None
             avg_s = f"{avg:.2f}s" if avg else "-"
             print(
-                f"[resume] {len(results)}/{total_tasks} "
+                f"[resume] {completed}/{total_tasks} "
                 f"ok={ok_count} skip={skipped_count} err={error_count} "
                 f"last={result.duration_s:.2f}s avg={avg_s} "
                 f"rss={rss_mb():.1f}MB elapsed={elapsed:.1f}s"
             )
 
-    errors = [r for r in results if r.status == "error"]
-    if errors:
-        raise RuntimeError(
-            "Some resume tasks failed:\n"
-            + "\n".join(f"  batch_id={r.batch_id}: {r.message}" for r in errors)
-        )
-    return results
+    return RunOutcome(results=results, incomplete=incomplete)
 
 
 
@@ -334,7 +353,7 @@ def _run_tasks_threaded(
     verbose: bool,
     max_chunk_files: int | None,
     merge_chunk_group_size: int | None,
-) -> list[WorkerResult]:
+) -> RunOutcome:
     tl = threading.local()
 
     def _get_decoder():
@@ -358,7 +377,7 @@ def _run_tasks_threaded(
 
         def _iter_results():
             for future in as_completed(futures):
-                yield future.result()
+                yield futures[future], future.result()
 
         return _chunk_loop(
             _iter_results(),
@@ -402,6 +421,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=_parse_bool,
         help="Remove chunk/part files after final outputs are written.",
     )
+    parser.add_argument(
+        "--timeout_multiplier",
+        default=10.0,
+        type=float,
+        help="Per-task timeout = timeout_multiplier * probe-estimated task duration.",
+    )
+    parser.add_argument(
+        "--min_task_timeout_s",
+        default=60.0,
+        type=float,
+        help="Floor for the adaptive per-task timeout, in seconds.",
+    )
+    parser.add_argument(
+        "--max_task_retries",
+        default=1,
+        type=int,
+        help="Number of retries for a task that times out or errors.",
+    )
+    parser.add_argument(
+        "--maxtasksperchild",
+        default=50,
+        type=int,
+        help="Recycle each pool worker after this many tasks (<=0 disables).",
+    )
     return parser.parse_args(argv)
 
 
@@ -414,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
     verbose = args.verbose
     max_chunk_files = args.max_chunk_files if args.max_chunk_files > 0 else None
     merge_chunk_group_size = args.merge_chunk_group_size
+    maxtasksperchild = args.maxtasksperchild if args.maxtasksperchild > 0 else None
 
     if not output_dir.exists():
         raise FileNotFoundError(f"output_dir not found: {output_dir}")
@@ -490,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[resume] covered     : {covered_shots}  ({100 * covered_shots / total_shots:.1f}%)")
     print(f"[resume] remaining   : {remaining_shots}")
 
-    new_results: list[WorkerResult] = []
+    new_outcome: RunOutcome = RunOutcome([], [])
 
     if remaining_shots > 0:
         uncovered = _uncovered_ranges(covered, shot_id_offset, total_shots)
@@ -542,7 +586,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[resume] {len(tasks)} tasks for {sum(t.num_shots for t in tasks)} remaining shots")
 
             start_time = datetime.now(timezone.utc)
-            new_results = _run_tasks_threaded(
+            new_outcome = _run_tasks_threaded(
                 tasks,
                 dem=dem,
                 shared_env=shared_env,
@@ -576,7 +620,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             ctx = mp.get_context("spawn")
             with ctx.Pool(
-                processes=num_workers, initializer=init_worker, initargs=(worker_config,)
+                processes=num_workers,
+                initializer=init_worker,
+                initargs=(worker_config,),
+                maxtasksperchild=maxtasksperchild,
             ) as pool:
                 probe_result = pool.apply(run_task, (probe_task,))
                 if probe_result.status != "ok":
@@ -590,32 +637,119 @@ def main(argv: list[str] | None = None) -> int:
                 shots_per_task = estimate_shots_per_task(
                     probe_shots, probe_result.duration_s, 30.0, min_shots=1,
                 )
+                task_timeout_s = estimate_task_timeout_s(
+                    probe_shots,
+                    probe_result.duration_s,
+                    shots_per_task,
+                    timeout_multiplier=args.timeout_multiplier,
+                    min_task_timeout_s=args.min_task_timeout_s,
+                )
                 if verbose:
                     print(f"[resume] probe: {probe_shots} shots in {probe_result.duration_s:.3f}s "
-                          f"→ shots_per_task={shots_per_task}")
+                          f"→ shots_per_task={shots_per_task} task_timeout_s={task_timeout_s:.1f}")
 
                 tasks = _make_resume_tasks(uncovered, dets_path, shot_id_offset, shots_per_task)
                 print(f"[resume] {len(tasks)} tasks for {sum(t.num_shots for t in tasks)} remaining shots")
 
                 start_time = datetime.now(timezone.utc)
-                new_results = _chunk_loop(
-                    pool.imap_unordered(run_task, tasks, chunksize=1),
-                    total_tasks=len(tasks),
-                    chunk_dir=chunk_dir,
-                    verbose=verbose,
-                    max_chunk_files=max_chunk_files,
-                    merge_chunk_group_size=merge_chunk_group_size,
+
+                merge_group_size = resolve_merge_group_size(max_chunk_files, merge_chunk_group_size)
+                part_dir = chunk_dir / "parts"
+                part_index = next_part_index(part_dir)
+                pending_chunks: list[Path] = []
+                seen_chunks: set[Path] = set()
+                ok_count = skipped_count = error_count = 0
+                ok_dur_sum = 0.0
+                completed = 0
+                wall_start = time.perf_counter()
+                total_tasks = len(tasks)
+
+                def _enqueue_chunk(path: Path) -> None:
+                    if path in seen_chunks:
+                        return
+                    seen_chunks.add(path)
+                    pending_chunks.append(path)
+
+                def _maybe_merge_chunks() -> None:
+                    nonlocal part_index
+                    if max_chunk_files is None or max_chunk_files <= 0:
+                        return
+                    if merge_group_size is None or merge_group_size <= 0:
+                        return
+                    while len(pending_chunks) >= max_chunk_files:
+                        group_size = min(merge_group_size, len(pending_chunks))
+                        group = [p for p in pending_chunks[:group_size] if p.exists()]
+                        del pending_chunks[:group_size]
+                        if not group:
+                            continue
+                        try:
+                            part_path = merge_chunks_into_part(group, part_dir, part_index)
+                        except Exception as exc:
+                            pending_chunks[:0] = group
+                            if verbose:
+                                print(f"[resume] merge failed: {exc}")
+                            break
+                        if verbose:
+                            print(f"[resume] merged {len(group)} chunks -> {part_path}")
+                        part_index += 1
+
+                def _on_result(result: WorkerResult) -> None:
+                    nonlocal completed, ok_count, skipped_count, error_count, ok_dur_sum
+                    completed += 1
+                    if result.status == "ok":
+                        ok_count += 1
+                        ok_dur_sum += result.duration_s
+                    elif result.status == "skipped":
+                        skipped_count += 1
+                    else:
+                        error_count += 1
+
+                    if result.status in {"ok", "skipped"}:
+                        _enqueue_chunk(result.output_path)
+                        _maybe_merge_chunks()
+
+                    if verbose:
+                        elapsed = time.perf_counter() - wall_start
+                        avg = ok_dur_sum / ok_count if ok_count else None
+                        avg_s = f"{avg:.2f}s" if avg is not None else "-"
+                        print(
+                            f"[resume] {completed}/{total_tasks} "
+                            f"ok={ok_count} skip={skipped_count} err={error_count} "
+                            f"last={result.duration_s:.2f}s avg={avg_s} "
+                            f"rss={rss_mb():.1f}MB elapsed={elapsed:.1f}s"
+                        )
+
+                new_outcome = run_pool_tasks(
+                    tasks,
+                    pool=pool,
+                    ctx=ctx,
+                    worker_config=worker_config,
+                    num_workers=num_workers,
+                    maxtasksperchild=maxtasksperchild,
+                    task_timeout_s=task_timeout_s,
+                    max_retries=args.max_task_retries,
+                    on_result=_on_result,
                 )
     else:
         print("[resume] All shots already complete. Skipping decoding, running collection only.")
         start_time = datetime.now(timezone.utc)
 
     # Collect all chunks (original + newly produced) into final outputs
-    print("[resume] Collecting results...")
-    metric_names = _collect_results(chunk_dir, output_dir, batch_num, decoder_info.metric_name)
+    has_outputs = bool(new_outcome.results) or covered_shots > 0
+    if has_outputs:
+        print("[resume] Collecting results...")
+        metric_names = _collect_results(chunk_dir, output_dir, batch_num, decoder_info.metric_name)
+    else:
+        metric_names = []
 
     if args.cleanup_intermediate:
         _cleanup_intermediate(chunk_dir)
+
+    incomplete_path = output_dir / INCOMPLETE_SHOTS_FILENAME
+    if new_outcome.incomplete:
+        write_incomplete_shots(incomplete_path, new_outcome.incomplete)
+    elif incomplete_path.exists():
+        incomplete_path.unlink()
 
     end_time = datetime.now(timezone.utc)
 
@@ -626,13 +760,22 @@ def main(argv: list[str] | None = None) -> int:
         num_workers=num_workers,
         start_time=start_time,
         end_time=end_time,
-        results=new_results,
+        results=new_outcome.results,
         metrics_recorded=metric_names,
+        incomplete_ranges=new_outcome.incomplete,
     )
     write_metadata(output_dir / "metadata.json", metadata)
 
     elapsed = (end_time - start_time).total_seconds()
     print(f"[resume] Done in {elapsed:.1f}s. Metadata → {output_dir / 'metadata.json'}")
+
+    if new_outcome.incomplete:
+        total = sum(r.shot_id_end - r.shot_id_start for r in new_outcome.incomplete)
+        raise IncompleteTasksError(
+            f"{len(new_outcome.incomplete)} task(s) covering {total} shot(s) did not "
+            f"complete. Outputs for completed shots were written to {output_dir}. "
+            f"See {incomplete_path} for affected shot_id ranges."
+        )
     return 0
 
 

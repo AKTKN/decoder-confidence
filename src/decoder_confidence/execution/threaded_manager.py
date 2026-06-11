@@ -30,6 +30,8 @@ from decoder_confidence.execution.hashing import chunk_path
 from decoder_confidence.execution.models import (
     DecoderBase,
     ExecutionConfig,
+    IncompleteRange,
+    RunOutcome,
     SharedEnvDecoderFactory,
     SimulationTask,
     WorkerResult,
@@ -123,13 +125,21 @@ def _run_task(
     )
 
 
-def run_manager_threaded(config: ExecutionConfig) -> list[WorkerResult]:
+def run_manager_threaded(config: ExecutionConfig) -> RunOutcome:
     """Run decoding tasks with a thread pool sharing one Gurobi env.
 
     Called automatically by ``run_manager`` when the decoder factory is a
     ``SharedEnvDecoderFactory``.  Worker threads each hold a thread-local
     decoder instance but all share the single env created here, so exactly
     one WLS session is consumed for the lifetime of the simulation.
+
+    Only Priority 2 (a single task's failure must not abort the whole job)
+    applies here -- there is no Priority 3 (timeout/hang detection). A
+    ``ThreadPoolExecutor`` future cannot be forcibly cancelled while its
+    underlying ``model.optimize()`` call is running, and killing the process
+    to escape a hung solve would also abort every other in-flight task. Tasks
+    whose worker raises are recorded as ``IncompleteRange(reason="error")``
+    after a single attempt, with no retry.
     """
     factory = config.decoder_factory
     if not isinstance(factory, SharedEnvDecoderFactory):
@@ -281,6 +291,8 @@ def run_manager_threaded(config: ExecutionConfig) -> list[WorkerResult]:
                 print(f"merged {len(group)} chunks -> {part_path}")
             part_index += 1
 
+    incomplete: list[IncompleteRange] = []
+
     with ThreadPoolExecutor(max_workers=config.num_workers) as executor:
         futures = {executor.submit(_process_task, t): t for t in tasks}
         for future in as_completed(futures):
@@ -295,6 +307,11 @@ def run_manager_threaded(config: ExecutionConfig) -> list[WorkerResult]:
                 skipped_count += 1
             else:
                 error_count += 1
+                incomplete.append(
+                    IncompleteRange.from_task(
+                        futures[future], reason="error", message=result.message
+                    )
+                )
 
             if result.status in {"ok", "skipped"}:
                 _enqueue_chunk(result.output_path)
@@ -311,11 +328,5 @@ def run_manager_threaded(config: ExecutionConfig) -> list[WorkerResult]:
                     f"rss={rss_mb():.1f}MB elapsed={elapsed:.1f}s"
                 )
 
-    errors = [r for r in results if r.status == "error"]
-    if errors:
-        messages = "\n".join(
-            f"batch_id={r.batch_id} msg={r.message}" for r in errors
-        )
-        raise RuntimeError(f"One or more tasks failed:\n{messages}")
-
-    return results
+    ok_skipped = [r for r in results if r.status in {"ok", "skipped"}]
+    return RunOutcome(results=ok_skipped, incomplete=incomplete)

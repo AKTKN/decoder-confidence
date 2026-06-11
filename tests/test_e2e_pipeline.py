@@ -11,6 +11,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from decoder_confidence.decoding.__main__ import main as decoding_main
+from decoder_confidence.execution.models import IncompleteTasksError
 from decoder_confidence.sampling.__main__ import main as sampling_main
 
 CIRCUIT_STEM = "code=surface_code_Z,d=5,rounds=5,noisemodel=si1000,p=0.001"
@@ -124,6 +125,8 @@ def test_step3_decoding_e2e(sampled_output: Path) -> None:
     try:
         rc = decoding_main(args)
     except RuntimeError as exc:
+        if isinstance(exc, IncompleteTasksError):
+            raise
         pytest.skip(str(exc))
     assert rc == 0
 
@@ -168,6 +171,8 @@ def test_step3_decoding_cplex_e2e(sampled_output_phen: Path) -> None:
     try:
         rc = decoding_main(args)
     except RuntimeError as exc:
+        if isinstance(exc, IncompleteTasksError):
+            raise
         pytest.skip(str(exc))
     assert rc == 0
 

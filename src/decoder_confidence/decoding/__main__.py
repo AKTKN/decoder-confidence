@@ -11,8 +11,13 @@ import polars as pl
 
 from decoder_confidence.varint import write_obs_flip_idx_file
 from decoder_confidence.decoding.decoder_factory import load_decoder_factory
+from decoder_confidence.decoding.incomplete import (
+    INCOMPLETE_SHOTS_FILENAME,
+    write_incomplete_shots,
+)
 from decoder_confidence.decoding.metadata import build_decoding_metadata, write_metadata
 from decoder_confidence.execution.manager import ExecutionConfig, run_manager
+from decoder_confidence.execution.models import IncompleteTasksError
 
 
 def _parse_bool(value: str | bool) -> bool:
@@ -331,12 +336,20 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     start_time = datetime.now(timezone.utc)
-    results = run_manager(exec_config)
-    metric_names = _collect_results(
-        chunk_dir, output_dir, args.batch_num, decoder_info.metric_name
+    outcome = run_manager(exec_config)
+    metric_names = (
+        _collect_results(chunk_dir, output_dir, args.batch_num, decoder_info.metric_name)
+        if outcome.results
+        else []
     )
     if args.cleanup_intermediate:
         _cleanup_intermediate(chunk_dir)
+
+    incomplete_path = output_dir / INCOMPLETE_SHOTS_FILENAME
+    if outcome.incomplete:
+        write_incomplete_shots(incomplete_path, outcome.incomplete)
+    elif incomplete_path.exists():
+        incomplete_path.unlink()
 
     end_time = datetime.now(timezone.utc)
     metadata = build_decoding_metadata(
@@ -346,10 +359,19 @@ def main(argv: list[str] | None = None) -> int:
         num_workers=args.num_workers,
         start_time=start_time,
         end_time=end_time,
-        results=results,
+        results=outcome.results,
         metrics_recorded=metric_names,
+        incomplete_ranges=outcome.incomplete,
     )
     write_metadata(output_dir / "metadata.json", metadata)
+
+    if outcome.incomplete:
+        total = sum(r.shot_id_end - r.shot_id_start for r in outcome.incomplete)
+        raise IncompleteTasksError(
+            f"{len(outcome.incomplete)} task(s) covering {total} shot(s) did not "
+            f"complete. Outputs for completed shots were written to {output_dir}. "
+            f"See {incomplete_path} for affected shot_id ranges."
+        )
     return 0
 
 

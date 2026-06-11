@@ -199,6 +199,29 @@ class DecoderAdapter(ABC):
         ...
 
 
+def _dispose_solver_model(decoder: Any) -> None:
+    """Best-effort release of the native solver handle held by an ILPDecoder.
+
+    ``ILPDecoder._base_model_result.model`` is a ``cplex.Cplex`` (has
+    ``.end()``) or ``gurobipy.Model`` (has ``.dispose()``); Python GC does not
+    promptly release the underlying native solver state.
+    """
+    base = getattr(decoder, "_base_model_result", None)
+    model = getattr(base, "model", None) if base is not None else None
+    if model is None:
+        return
+    if hasattr(model, "end"):
+        try:
+            model.end()
+        except Exception:
+            pass
+    elif hasattr(model, "dispose"):
+        try:
+            model.dispose()
+        except Exception:
+            pass
+
+
 @dataclass
 class IlpDecoderAdapter(DecoderAdapter):
     _decoder: Any
@@ -247,6 +270,7 @@ class IlpDecoderAdapter(DecoderAdapter):
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("ilp_decoder is required for ILP adapter") from exc
 
+        old_decoder = self._decoder
         self._decoder = ILPDecoder(
             parity_check_matrix=self._check_matrix,
             observables=self._observables_matrix,
@@ -254,6 +278,7 @@ class IlpDecoderAdapter(DecoderAdapter):
             config=self._config,
             deps=self._deps,
         )
+        _dispose_solver_model(old_decoder)
 
 
 @dataclass
