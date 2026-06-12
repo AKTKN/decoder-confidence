@@ -171,9 +171,9 @@ def load_decoder_factory(
                 "Set solver: gurobi or solver: cplex"
             )
         if solver == "gurobi":
-            factory = make_ilp_decoder_factory(dem_path, decoder_options)
+            factory = make_ilp_decoder_factory(dem_path, decoder_options, metric_options)
         elif solver == "cplex":
-            factory = make_cplex_decoder_factory(dem_path, decoder_options)
+            factory = make_cplex_decoder_factory(dem_path, decoder_options, metric_options)
         else:
             raise ValueError(
                 f"Unknown solver '{solver}' for ILP decoder. "

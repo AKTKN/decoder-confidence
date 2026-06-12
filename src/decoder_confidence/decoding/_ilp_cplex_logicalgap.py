@@ -91,7 +91,10 @@ def _build_logical_gap_model_cplex_with_symmetry(
 
 
 def _build_cplex_decoder(
-    dem: stim.DetectorErrorModel, config: DecoderConfig
+    dem: stim.DetectorErrorModel,
+    config: DecoderConfig,
+    *,
+    get_detail_stat: bool = False,
 ) -> _ILPLogicalGapDecoder:
     matrices = _dem_to_matrices_with_edge_priors(dem, allow_undecomposed_hyperedges=True)
     priors = _clip_priors(matrices.priors)
@@ -109,7 +112,10 @@ def _build_cplex_decoder(
         config=config,
         deps=deps,
     )
-    return _ILPLogicalGapDecoder(decoder=decoder)
+    return _ILPLogicalGapDecoder(
+        decoder=decoder,
+        get_detail_stat=get_detail_stat,
+    )
 
 
 @dataclass(frozen=True)
@@ -123,19 +129,26 @@ class _CPLEXDecoderFactory:
 
     dem_path: Path
     decoder_options: Mapping[str, Any]
+    metric_options: Mapping[str, Any]
 
     def __call__(self, dem: stim.DetectorErrorModel | None = None) -> _ILPLogicalGapDecoder:
         if dem is None:
             dem = stim.DetectorErrorModel.from_file(str(self.dem_path))
         config = _build_cplex_decoder_config(self.decoder_options)
-        return _build_cplex_decoder(dem, config)
+        return _build_cplex_decoder(
+            dem,
+            config,
+            get_detail_stat=bool(self.metric_options.get("get_detail_stat", False)),
+        )
 
 
 def make_cplex_decoder_factory(
     dem_path: Path,
     decoder_options: Mapping[str, Any],
+    metric_options: Mapping[str, Any] | None = None,
 ) -> _CPLEXDecoderFactory:
     return _CPLEXDecoderFactory(
         dem_path=dem_path,
         decoder_options=dict(decoder_options),
+        metric_options=dict(metric_options or {}),
     )

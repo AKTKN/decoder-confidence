@@ -36,6 +36,10 @@ from analysis.src.case_histogram import (
     CASE_TICK_LABELS,
     CASE_DESCRIPTIONS,
     case_description_text,
+    LogicalGapSplitConfig,
+    LogicalGapSplitAnalyzer,
+    OverrideProbabilityConfig,
+    OverrideProbabilityAnalyzer,
 )
 from analysis.src.figure_style import (
     MultiStyleFigureExporter,
@@ -55,6 +59,9 @@ from analysis.src.plot_utils import (
     draw_relative_improvement,
     draw_case_histogram,
     draw_case_scatter,
+    draw_logical_gap_split_by_case,
+    draw_override_probability,
+    draw_override_gap_histogram,
 )
 
 __all__ = [
@@ -85,6 +92,10 @@ __all__ = [
     "CASE_TICK_LABELS",
     "CASE_DESCRIPTIONS",
     "case_description_text",
+    "LogicalGapSplitConfig",
+    "LogicalGapSplitAnalyzer",
+    "OverrideProbabilityConfig",
+    "OverrideProbabilityAnalyzer",
     "MultiStyleFigureExporter",
     "apply_paper_style",
     "set_tab10_colors",
@@ -100,4 +111,7 @@ __all__ = [
     "draw_relative_improvement",
     "draw_case_histogram",
     "draw_case_scatter",
+    "draw_logical_gap_split_by_case",
+    "draw_override_probability",
+    "draw_override_gap_histogram",
 ]

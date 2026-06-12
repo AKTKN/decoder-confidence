@@ -27,6 +27,12 @@ import numpy as np
 import polars as pl
 
 from analysis.src.config import PlotConfig
+from analysis.src.confidence import (
+    BinnedProportions,
+    bin_proportions,
+    shade_ci,
+    value_proportions,
+)
 from analysis.src.data_manager import (
     SimulationDataManager,
     _extract_batch_idx,
@@ -767,9 +773,11 @@ class CaseScatterConfig:
 # Data loader for scatter plots (forced_gap_ml + case, joined on shot_id)
 # ---------------------------------------------------------------------------
 
-def _load_forced_gap_with_case_lazy(
+def _load_forced_gap_full_lazy(
     result_dir_root: Path,
-    config: CaseScatterConfig,
+    filters: dict[str, Any],
+    decoder_names: Optional[List[str]],
+    batch_indices: Optional[List[int]],
 ) -> pl.LazyFrame:
     """Return a LazyFrame with forced_gap_ml, forced_gap_ml_case, and is_logical_error.
 
@@ -791,7 +799,7 @@ def _load_forced_gap_with_case_lazy(
         if not _is_circuit_params_dir(circuit_entry.name):
             continue
         circuit_params = _parse_kv(circuit_entry.name)
-        if not _matches_all_filters(circuit_params, config.filters):
+        if not _matches_all_filters(circuit_params, filters):
             continue
 
         decoding_dir = circuit_entry / "decoding_result"
@@ -807,10 +815,7 @@ def _load_forced_gap_with_case_lazy(
                 continue
 
             decoder = _strip_quotes(dm_params.get("decoder", ""))
-            if (
-                config.forced_gap_decoder_names is not None
-                and decoder not in config.forced_gap_decoder_names
-            ):
+            if decoder_names is not None and decoder not in decoder_names:
                 continue
 
             for case_file in sorted(
@@ -819,10 +824,7 @@ def _load_forced_gap_with_case_lazy(
                 batch_idx = _extract_batch_idx(case_file.name)
                 if batch_idx is None:
                     continue
-                if (
-                    config.batch_indices is not None
-                    and batch_idx not in config.batch_indices
-                ):
+                if batch_indices is not None and batch_idx not in batch_indices:
                     continue
 
                 fg_file = dm_entry / f"metric=forced_gap_ml_batch={batch_idx}.parquet"
@@ -852,3 +854,660 @@ def _load_forced_gap_with_case_lazy(
         )
 
     return pl.concat(frames, how="diagonal")
+
+
+def _load_forced_gap_with_case_lazy(
+    result_dir_root: Path,
+    config: CaseScatterConfig,
+) -> pl.LazyFrame:
+    """Return a LazyFrame with forced_gap_ml, forced_gap_ml_case, and is_logical_error.
+
+    Thin wrapper around :func:`_load_forced_gap_full_lazy` using the
+    filter/decoder/batch settings from *config*.
+    """
+    return _load_forced_gap_full_lazy(
+        result_dir_root,
+        config.filters,
+        config.forced_gap_decoder_names,
+        config.batch_indices,
+    )
+
+
+# ---------------------------------------------------------------------------
+# logical_gap distributions split by linearize_logicalgap sign (and case)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LogicalGapSplitConfig:
+    """Configuration for logical_gap histograms split by ``linearize_logicalgap`` sign.
+
+    The underlying dataset joins, on ``shot_id`` (plus shared circuit-parameter
+    columns), three per-shot quantities:
+
+    - ``linearize_logicalgap`` — used to split shots into two groups
+      (inclusive ``<= linearize_threshold`` vs ``> linearize_threshold`` by
+      default, configurable via ``include_0``).
+    - ``forced_gap_ml`` / ``forced_gap_ml_case`` / its ``is_logical_error`` —
+      the case label is used to further split the "negative" group into
+      cases 0-3, and its ``is_logical_error`` flag is used for the optional
+      negative-gap convention.
+    - ``logical_gap`` — the metric plotted on the x-axis.
+
+    Parameters
+    ----------
+    filters :
+        Circuit-parameter filters applied at directory-scan time (same
+        semantics as ``PlotConfig.filters``).
+    linearize_decoder_names :
+        Decoder name(s) to load ``linearize_logicalgap`` from. ``None``
+        includes all decoders found on disk for that metric.
+    forced_gap_decoder_names :
+        Decoder name(s) to load ``forced_gap_ml`` / ``forced_gap_ml_case``
+        from (requires ``get_all_failure_rate=True``).
+    logical_gap_decoder_names :
+        Decoder name(s) to load ``logical_gap`` from.
+    batch_indices :
+        Restrict loading to specific batch indices. ``None`` loads all.
+    linearize_threshold :
+        Threshold applied to ``linearize_logicalgap`` to split shots into the
+        two groups (``<= threshold`` vs ``> threshold``). Defaults to ``0.0``.
+    include_0 :
+        When ``True`` (default), the threshold comparison is inclusive
+        (``<= linearize_threshold``). When ``False``, the comparison is strict
+        (``< linearize_threshold``). The name reflects the common
+        ``linearize_threshold == 0`` use case for override analysis.
+    use_negative_gap :
+        When ``True``, ``logical_gap`` values for shots where
+        ``forced_gap_ml`` is a logical error are negated before histogramming.
+    bin_width :
+        ``None`` (default) counts frequencies at each unique ``logical_gap``
+        value. A positive integer groups values into bins of that width
+        (via floor division) before counting.
+    round_digits :
+        Decimal digits to round ``logical_gap`` to before computing unique
+        values / bins. Values are always pre-rounded to
+        :data:`_GAP_FP_NOISE_DECIMALS` decimals first to collapse
+        floating-point noise (e.g. a "true" gap of 0 stored as ``±1e-13``);
+        ``round_digits`` applies *additional* (typically coarser) rounding on
+        top of that, e.g. to merge near-but-not-quite-equal gap values into a
+        single bar in unique-value mode.
+    """
+
+    filters: dict[str, Any] = field(default_factory=dict)
+    linearize_decoder_names: Optional[List[str]] = None
+    forced_gap_decoder_names: Optional[List[str]] = None
+    logical_gap_decoder_names: Optional[List[str]] = None
+    batch_indices: Optional[List[int]] = None
+    linearize_threshold: float = 0.0
+    include_0: bool = True
+    use_negative_gap: bool = False
+    bin_width: Optional[int] = None
+    round_digits: Optional[int] = None
+
+
+# Decimal places used to collapse floating-point noise in logical_gap values
+# (e.g. a "true" gap of 0 may be stored as ±1e-13) before computing unique
+# values or bins. Far finer than any meaningful gap resolution.
+_GAP_FP_NOISE_DECIMALS = 9
+
+
+def _load_logical_gap_split_data(
+    manager: SimulationDataManager,
+    config: LogicalGapSplitConfig,
+) -> pl.DataFrame:
+    """Join linearize_logicalgap, forced_gap_ml(+case+is_logical_error), and logical_gap.
+
+    Returns a single :class:`polars.DataFrame` with (at least) the columns
+    ``linearize_logicalgap``, ``forced_gap_ml_case``, ``is_logical_error_fg``,
+    and ``logical_gap``, with rows restricted to shots present in all three
+    sources.
+    """
+    lin_lf = manager.query(PlotConfig(
+        metric_name="linearize_logicalgap",
+        decoder_names=config.linearize_decoder_names,
+        filters=config.filters,
+        batch_indices=config.batch_indices,
+    ))
+    fg_lf = _load_forced_gap_full_lazy(
+        manager.result_dir_root,
+        config.filters,
+        config.forced_gap_decoder_names,
+        config.batch_indices,
+    )
+    lg_lf = manager.query(PlotConfig(
+        metric_name="logical_gap",
+        decoder_names=config.logical_gap_decoder_names,
+        filters=config.filters,
+        batch_indices=config.batch_indices,
+    ))
+
+    schema_lin = set(lin_lf.collect_schema().names())
+    schema_fg = set(fg_lf.collect_schema().names())
+    schema_lg = set(lg_lf.collect_schema().names())
+
+    join_keys_lin_fg = ["shot_id"] + [
+        k for k in _CIRCUIT_PARAM_KEYS if k in schema_lin and k in schema_fg
+    ]
+    join_keys_fg_lg = ["shot_id"] + [
+        k for k in _CIRCUIT_PARAM_KEYS if k in schema_fg and k in schema_lg
+    ]
+
+    lin_cols = list(dict.fromkeys(
+        [c for c in join_keys_lin_fg if c in schema_lin] + ["linearize_logicalgap"]
+    ))
+    fg_cols = list(dict.fromkeys(
+        [c for c in join_keys_lin_fg if c in schema_fg]
+        + [c for c in join_keys_fg_lg if c in schema_fg]
+        + ["forced_gap_ml", "forced_gap_ml_case", "is_logical_error"]
+    ))
+    lg_cols = list(dict.fromkeys(
+        [c for c in join_keys_fg_lg if c in schema_lg] + ["logical_gap"]
+    ))
+
+    lin_df = lin_lf.select(lin_cols).collect()
+    fg_df = fg_lf.select(fg_cols).collect().rename({"is_logical_error": "is_logical_error_fg"})
+    lg_df = lg_lf.select(lg_cols).collect()
+
+    actual_keys_lin_fg = [
+        k for k in join_keys_lin_fg if k in lin_df.columns and k in fg_df.columns
+    ]
+    df = fg_df.join(lin_df, on=actual_keys_lin_fg, how="inner")
+
+    actual_keys_fg_lg = [
+        k for k in join_keys_fg_lg if k in df.columns and k in lg_df.columns
+    ]
+    df = df.join(lg_df, on=actual_keys_fg_lg, how="inner")
+
+    return df.drop_nulls(["linearize_logicalgap", "logical_gap", "forced_gap_ml_case"])
+
+
+def _normalized_histogram(
+    values: np.ndarray,
+    bin_width: Optional[int] = None,
+    normalize: bool = True,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return ``(x, heights, bar_width)`` for a per-group histogram.
+
+    If *bin_width* is ``None``, frequencies are counted at each unique value
+    of *values*. If *bin_width* is a positive integer, values are grouped
+    into bins of that width via floor division
+    (``floor(value / bin_width) * bin_width``) before counting.
+
+    When *normalize* is ``True`` (default), heights are divided by the total
+    count (so they sum to 1). When ``False``, heights are raw counts.
+    """
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        return np.array([]), np.array([]), 1.0
+
+    total = values.size
+
+    if bin_width is None:
+        unique_vals, counts = np.unique(values, return_counts=True)
+        heights = counts / total if normalize else counts.astype(float)
+        return unique_vals, heights, 0.8
+
+    if bin_width <= 0:
+        raise ValueError("bin_width must be a positive integer or None")
+
+    bin_idx = np.floor(values / bin_width).astype(np.int64)
+    unique_bins, counts = np.unique(bin_idx, return_counts=True)
+    x = unique_bins.astype(float) * bin_width
+    heights = counts / total if normalize else counts.astype(float)
+    return x, heights, float(bin_width) * 0.8
+
+
+class LogicalGapSplitAnalyzer:
+    """Histograms of ``logical_gap`` split by ``linearize_logicalgap`` sign.
+
+    Each histogram is normalized within its own group (heights sum to 1),
+    so that groups of very different sizes can be compared on the same axes
+    without rare-event distortion.
+
+    Methods
+    -------
+    plot_split_by_sign_and_case(manager, config, ax, case_values=[0, 1, 2, 3])
+        Five overlaid histograms: the ``> threshold`` group, plus the
+        ``<= threshold`` group split into ``forced_gap_ml_case`` values
+        ``0``-``3``.
+    """
+
+    def plot_split_by_sign_and_case(
+        self,
+        manager: SimulationDataManager,
+        config: LogicalGapSplitConfig,
+        ax: plt.Axes,
+        *,
+        case_values: list[int] | None = None,
+        bar_kw: dict[str, Any] | None = None,
+    ) -> plt.Axes:
+        """Draw five normalized ``logical_gap`` histograms onto *ax*.
+
+        One for ``linearize_logicalgap > config.linearize_threshold`` (or
+        ``>=`` when ``include_0=False``), and
+        one for each ``forced_gap_ml_case`` value in *case_values* (default
+        ``[0, 1, 2, 3]``) restricted to
+        ``linearize_logicalgap <= config.linearize_threshold`` (or ``<`` when
+        ``include_0=False``).
+        """
+        df = _load_logical_gap_split_data(manager, config)
+        bar_kw = dict(bar_kw or {})
+        case_values = [0, 1, 2, 3] if case_values is None else case_values
+
+        if config.include_0:
+            positive_df = df.filter(pl.col("linearize_logicalgap") > config.linearize_threshold)
+            negative_df = df.filter(pl.col("linearize_logicalgap") <= config.linearize_threshold)
+        else:
+            positive_df = df.filter(pl.col("linearize_logicalgap") >= config.linearize_threshold)
+            negative_df = df.filter(pl.col("linearize_logicalgap") < config.linearize_threshold)
+
+        self._draw_group(
+            ax, positive_df,
+            config, f"linearize_logicalgap > {config.linearize_threshold:g}", bar_kw,
+        )
+
+        for case_val in case_values:
+            sub = negative_df.filter(pl.col("forced_gap_ml_case") == case_val)
+            label = f"Case {case_val}: {CASE_DESCRIPTIONS[case_val].split(':')[1].strip()}"
+            self._draw_group(ax, sub, config, label, bar_kw)
+
+        return ax
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _gap_values(
+        df: pl.DataFrame, use_negative_gap: bool, round_digits: Optional[int] = None,
+    ) -> np.ndarray:
+        if df.is_empty():
+            return np.array([], dtype=float)
+
+        values = df["logical_gap"].to_numpy().astype(float)
+        if use_negative_gap:
+            is_err = df["is_logical_error_fg"].to_numpy().astype(bool)
+            values = values.copy()
+            values[is_err] *= -1.0
+
+        # Collapse floating-point noise (e.g. a "true" gap of 0 stored as
+        # ±1e-13) so it doesn't fragment into many near-duplicate bars.
+        values = np.round(values, _GAP_FP_NOISE_DECIMALS)
+        if round_digits is not None:
+            values = np.round(values, round_digits)
+        return values
+
+    def _draw_group(
+        self,
+        ax: plt.Axes,
+        df: pl.DataFrame,
+        config: LogicalGapSplitConfig,
+        label: str,
+        bar_kw: dict[str, Any],
+    ) -> None:
+        values = self._gap_values(df, config.use_negative_gap, config.round_digits)
+        if values.size == 0:
+            return
+        x, heights, width = _normalized_histogram(values, config.bin_width)
+        kw = {"alpha": 0.5, **bar_kw}
+        ax.bar(x, heights, width=width, label=label, **kw)
+
+
+# ---------------------------------------------------------------------------
+# P(linearize_logicalgap <= threshold | logical_gap) ("override probability")
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OverrideProbabilityConfig:
+    """Configuration for P(linearize_logicalgap <= threshold | logical_gap).
+
+    "Override" refers to shots where ``linearize_logicalgap`` is at or below
+    ``linearize_threshold`` (default ``0.0``) -- or strictly below it when
+    ``include_0=False``. This config describes the
+    conditional probability of "override" given the exact ``logical_gap``
+    (ILP) value, together with Wilson confidence intervals.
+
+    Parameters
+    ----------
+    filters :
+        Circuit-parameter filters applied at directory-scan time (same
+        semantics as ``PlotConfig.filters``).
+    linearize_decoder_names :
+        Decoder name(s) to load ``linearize_logicalgap`` from.
+    logical_gap_decoder_names :
+        Decoder name(s) to load ``logical_gap`` (x-axis, "exact gap") from.
+    batch_indices :
+        Restrict loading to specific batch indices. ``None`` loads all.
+    linearize_threshold :
+        Threshold applied to ``linearize_logicalgap`` to define "override"
+        (``linearize_logicalgap <= linearize_threshold``). Defaults to ``0.0``.
+    include_0 :
+        When ``True`` (default), the threshold comparison is inclusive
+        (``<= linearize_threshold``). When ``False``, the comparison is strict
+        (``< linearize_threshold``). The name reflects the common
+        ``linearize_threshold == 0`` use case for override analysis.
+    bins :
+        Number of uniform bins along ``logical_gap``. ``None`` (default) uses
+        each unique (rounded) ``logical_gap`` value directly.
+    round_digits :
+        Decimal digits to round ``logical_gap`` to before grouping. Values
+        are always pre-rounded to :data:`_GAP_FP_NOISE_DECIMALS` decimals
+        first to collapse floating-point noise; ``round_digits`` applies
+        additional (typically coarser) rounding on top of that.
+    alpha :
+        Wilson CI significance level (default ``0.05`` -> 95% CI).
+    """
+
+    filters: dict[str, Any] = field(default_factory=dict)
+    linearize_decoder_names: Optional[List[str]] = None
+    logical_gap_decoder_names: Optional[List[str]] = None
+    batch_indices: Optional[List[int]] = None
+    linearize_threshold: float = 0.0
+    include_0: bool = True
+    bins: Optional[int] = None
+    round_digits: Optional[int] = None
+    alpha: float = 0.05
+
+
+def _override_mask(
+    values: np.ndarray,
+    *,
+    threshold: float,
+    include_0: bool,
+) -> np.ndarray:
+    """Return the override indicator mask for linearized-gap values."""
+    values = np.asarray(values, dtype=float)
+    if include_0:
+        return values <= threshold
+    return values < threshold
+
+
+def _load_override_probability_data(
+    manager: SimulationDataManager,
+    config: OverrideProbabilityConfig,
+) -> pl.DataFrame:
+    """Return linearize_logicalgap and logical_gap joined on shot_id."""
+    lin_lf = manager.query(PlotConfig(
+        metric_name="linearize_logicalgap",
+        decoder_names=config.linearize_decoder_names,
+        filters=config.filters,
+        batch_indices=config.batch_indices,
+    ))
+    lg_lf = manager.query(PlotConfig(
+        metric_name="logical_gap",
+        decoder_names=config.logical_gap_decoder_names,
+        filters=config.filters,
+        batch_indices=config.batch_indices,
+    ))
+
+    schema_lin = set(lin_lf.collect_schema().names())
+    schema_lg = set(lg_lf.collect_schema().names())
+    join_keys = ["shot_id"] + [
+        k for k in _CIRCUIT_PARAM_KEYS if k in schema_lin and k in schema_lg
+    ]
+
+    lin_cols = list(dict.fromkeys(
+        [c for c in join_keys if c in schema_lin] + ["linearize_logicalgap"]
+    ))
+    lg_cols = list(dict.fromkeys(
+        [c for c in join_keys if c in schema_lg] + ["logical_gap"]
+    ))
+
+    lin_df = lin_lf.select(lin_cols).collect()
+    lg_df = lg_lf.select(lg_cols).collect()
+
+    actual_keys = [k for k in join_keys if k in lin_df.columns and k in lg_df.columns]
+    df = lin_df.join(lg_df, on=actual_keys, how="inner")
+    return df.drop_nulls(["linearize_logicalgap", "logical_gap"])
+
+
+def _bar_width_from_centers(centers: np.ndarray, default: float = 0.8) -> float:
+    """Return a bar width ~80% of the smallest spacing between *centers*."""
+    if centers.size < 2:
+        return default
+    diffs = np.diff(np.sort(centers))
+    diffs = diffs[diffs > 0]
+    if diffs.size == 0:
+        return default
+    return float(diffs.min()) * 0.8
+
+
+class OverrideProbabilityAnalyzer:
+    """P(linearize_logicalgap <= threshold | logical_gap) with Wilson CI.
+
+    Two rendering styles are provided:
+
+    - :meth:`plot_bar` -- bar chart with Wilson 95% CI error bars on top of
+      each bar. Suitable for noise models where ``logical_gap`` takes few
+      discrete values (e.g. phenomenological noise).
+    - :meth:`plot_scatter` -- scatter plot with a shaded Wilson CI band.
+      Suitable for noise models where ``logical_gap`` is effectively
+      continuous (e.g. circuit-level noise).
+    """
+
+    def compute_stats(
+        self,
+        manager: SimulationDataManager,
+        config: OverrideProbabilityConfig,
+    ) -> BinnedProportions:
+        """Return per-(rounded-)value or per-bin override-probability stats."""
+        df = _load_override_probability_data(manager, config)
+
+        x = df["logical_gap"].to_numpy().astype(float)
+        # Collapse floating-point noise (e.g. a "true" gap of 0 stored as
+        # ±1e-13) before grouping by value.
+        x = np.round(x, _GAP_FP_NOISE_DECIMALS)
+        if config.round_digits is not None:
+            x = np.round(x, config.round_digits)
+
+        success = _override_mask(
+            df["linearize_logicalgap"].to_numpy().astype(float),
+            threshold=config.linearize_threshold,
+            include_0=config.include_0,
+        ).astype(float)
+
+        if config.bins is None:
+            return value_proportions(x, success, alpha=config.alpha)
+        return bin_proportions(x, success, bins=config.bins, alpha=config.alpha)
+
+    @staticmethod
+    def _compute_override_stats_for_values(
+        x: np.ndarray,
+        success: np.ndarray,
+        *,
+        bins: int | None,
+        round_digits: int | None,
+        alpha: float,
+    ) -> BinnedProportions:
+        """Return P(override | x) stats for one gap-like x-axis array."""
+        x = np.asarray(x, dtype=float)
+        success = np.asarray(success, dtype=float)
+
+        x = np.round(x, _GAP_FP_NOISE_DECIMALS)
+        if round_digits is not None:
+            x = np.round(x, round_digits)
+
+        if bins is None:
+            return value_proportions(x, success, alpha=alpha)
+        return bin_proportions(x, success, bins=bins, alpha=alpha)
+
+    def plot_bar(
+        self,
+        manager: SimulationDataManager,
+        config: OverrideProbabilityConfig,
+        ax: plt.Axes,
+        *,
+        bar_kw: dict[str, Any] | None = None,
+        errorbar_kw: dict[str, Any] | None = None,
+    ) -> plt.Axes:
+        """Draw a bar chart of P(override | logical_gap) with Wilson CI error bars."""
+        bstats = self.compute_stats(manager, config)
+        valid = bstats.totals > 0
+        centers = bstats.centers[valid]
+        p = bstats.proportions[valid]
+
+        if centers.size == 0:
+            return ax
+
+        counts = bstats.counts[valid]
+        ci_low = bstats.ci_low[valid]
+        ci_high = bstats.ci_high[valid]
+        yerr_lower = np.clip(p - ci_low, 0, None)
+        yerr_upper = np.clip(ci_high - p, 0, None)
+
+        width = _bar_width_from_centers(centers)
+        bar_kw = {"alpha": 0.7, "width": width, **(bar_kw or {})}
+        ax.bar(centers, p, **bar_kw)
+
+        # Skip error bars where no override was observed (count == 0):
+        # the CI then sits flush against p == 0 and would otherwise draw a
+        # bare error bar with no visible bar underneath it.
+        has_errorbar = counts > 0
+        if has_errorbar.any():
+            errorbar_kw = {"fmt": "none", "color": "black", "capsize": 3, **(errorbar_kw or {})}
+            ax.errorbar(
+                centers[has_errorbar], p[has_errorbar],
+                yerr=[yerr_lower[has_errorbar], yerr_upper[has_errorbar]],
+                **errorbar_kw,
+            )
+
+        return ax
+
+    def plot_scatter(
+        self,
+        manager: SimulationDataManager,
+        config: OverrideProbabilityConfig,
+        ax: plt.Axes,
+        *,
+        scatter_kw: dict[str, Any] | None = None,
+        shade_alpha: float = 0.2,
+    ) -> plt.Axes:
+        """Draw a scatter plot of P(override | logical_gap) with a shaded Wilson CI band."""
+        bstats = self.compute_stats(manager, config)
+        valid = bstats.totals > 0
+        centers = bstats.centers[valid]
+        p = bstats.proportions[valid]
+
+        if centers.size == 0:
+            return ax
+
+        ci_low = bstats.ci_low[valid]
+        ci_high = bstats.ci_high[valid]
+
+        scatter_kw = dict(scatter_kw or {})
+        sc = ax.scatter(centers, p, **scatter_kw)
+        color = sc.get_facecolor()[0]
+        shade_ci(ax, centers, ci_low, ci_high, color=color, alpha=shade_alpha)
+
+        return ax
+
+    def plot_override_gap_histogram(
+        self,
+        manager: SimulationDataManager,
+        config: LogicalGapSplitConfig,
+        ax: plt.Axes,
+        *,
+        bar_kw: dict[str, Any] | None = None,
+        errorbar_kw: dict[str, Any] | None = None,
+    ) -> plt.Axes:
+        """Compare P(override | gap) for exact-gap and forced-gap metrics.
+
+        The override event is defined by ``linearize_logicalgap`` being at or
+        below ``config.linearize_threshold`` (or strictly below it when
+        ``config.include_0=False``). Two conditional-probability series are
+        computed from the same joined per-shot table:
+
+        - ``P(override | logical_gap = g)`` using the exact ILP gap
+        - ``P(override | forced_gap_ml = g)`` using the BP-LSD forced gap
+
+        Both series are drawn as scatter points with Wilson CI error bars on
+        the same axes so they can be compared directly at each gap value.
+
+        ``config.use_negative_gap`` negates both gap values for shots where
+        ``forced_gap_ml`` is a logical error (``is_logical_error_fg``),
+        following the same convention as
+        :meth:`LogicalGapSplitAnalyzer.plot_split_by_sign_and_case`.
+        ``config.round_digits`` controls value grouping before probability
+        estimation. ``config.bin_width`` is currently unsupported for this
+        probability plot.
+        """
+        df = _load_logical_gap_split_data(manager, config)
+        if df.is_empty():
+            return ax
+
+        is_err = (
+            df["is_logical_error_fg"].to_numpy().astype(bool)
+            if config.use_negative_gap else None
+        )
+
+        if config.bin_width is not None:
+            raise ValueError(
+                "draw_override_gap_histogram now plots override probabilities; "
+                "bin_width is not supported. Use round_digits to control grouping."
+            )
+
+        success = _override_mask(
+            df["linearize_logicalgap"].to_numpy().astype(float),
+            threshold=config.linearize_threshold,
+            include_0=config.include_0,
+        ).astype(float)
+
+        series_stats: list[tuple[str, BinnedProportions]] = []
+        for column, label in (
+            ("logical_gap", "Exact gap"),
+            ("forced_gap_ml", "Forced gap"),
+        ):
+            values = df[column].to_numpy().astype(float)
+            if is_err is not None:
+                values = values.copy()
+                values[is_err] *= -1.0
+            stats = self._compute_override_stats_for_values(
+                values,
+                success,
+                bins=None,
+                round_digits=config.round_digits,
+                alpha=0.05,
+            )
+            series_stats.append((label, stats))
+
+        all_centers = np.unique(np.concatenate([
+            stats.centers[stats.totals > 0] for _, stats in series_stats
+        ]))
+        if all_centers.size == 0:
+            return ax
+
+        base_width = _bar_width_from_centers(all_centers)
+        offsets = (0, 0)
+        default_colors = ("tab:blue", "tab:orange")
+        base_scatter_kw = {"alpha": 0.85, "s": 36, **(bar_kw or {})}
+
+        for (offset, color, (label, stats)) in zip(offsets, default_colors, series_stats):
+            valid = stats.totals > 0
+            centers = stats.centers[valid]
+            p = stats.proportions[valid]
+            counts = stats.counts[valid]
+            ci_low = stats.ci_low[valid]
+            ci_high = stats.ci_high[valid]
+
+            shifted_centers = centers + offset
+            local_scatter_kw = {"color": color, **base_scatter_kw}
+            ax.scatter(shifted_centers, p, label=label, **local_scatter_kw)
+
+            has_errorbar = counts > 0
+            local_errorbar_kw = {
+                "fmt": "none",
+                "color": color,
+                "capsize": 3,
+                "alpha": 0.8,
+                **(errorbar_kw or {}),
+            }
+            yerr_lower = np.clip(p - ci_low, 0, None)
+            yerr_upper = np.clip(ci_high - p, 0, None)
+            ax.errorbar(
+                shifted_centers[has_errorbar],
+                p[has_errorbar],
+                yerr=[yerr_lower[has_errorbar], yerr_upper[has_errorbar]],
+                **local_errorbar_kw,
+            )
+
+        return ax

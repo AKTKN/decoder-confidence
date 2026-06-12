@@ -53,7 +53,7 @@ class PlotConfig:
         Keyword arguments forwarded verbatim to the underlying matplotlib primitive
         (e.g. ``{"bins": 50, "alpha": 0.7}``).  Special keys consumed internally:
         ``"bins"``, ``"alpha_ci"``, ``"shade_alpha"``, ``"round_digits"``,
-        ``"use_negative_gap"``, ``"convert_db"``.
+        ``"use_negative_gap"``, ``"convert_db"``, ``"use_linearize"``.
     extra_options:
         Reserved for future extensibility (e.g. conditional LER, post-selection).
     batch_indices:
@@ -122,6 +122,16 @@ class ConditionalLERConfig:
         Mapping from internal metric name to a human-readable display label used in
         legend entries (e.g. ``{"logical_gap": "BP decoder"}``).
         Metric names absent from the mapping fall back to the raw name.
+    split_by_sign:
+        When ``True``, split the data into a non-positive group
+        (``metric <= 0``) and a positive group (``metric > 0``) and plot each
+        group on its own axes. Fitting (``show_sigmoid_fit`` and
+        ``get_fitting_plot``) is performed independently for each group.
+        When enabled, ``ax`` passed to
+        :meth:`~ConditionalLERAnalyzer.plot_conditional_ler` and
+        :meth:`~ConditionalLERAnalyzer.plot_fitting` must be a 2-element
+        sequence ``(ax_negative, ax_positive)``. Mainly intended for metrics
+        that take both signs, e.g. ``"linearize_logicalgap"``.
     """
 
     metric_name: str | List[str]
@@ -136,3 +146,4 @@ class ConditionalLERConfig:
     round_digits: Optional[int] = None
     convert_db: bool = False
     metric_labels: Dict[str, str] = field(default_factory=dict)
+    split_by_sign: bool = False

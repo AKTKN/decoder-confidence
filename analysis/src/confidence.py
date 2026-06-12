@@ -169,6 +169,68 @@ def bin_density(
     )
 
 
+def value_proportions(
+    x: np.ndarray,
+    success: np.ndarray,
+    alpha: float = 0.05,
+) -> BinnedProportions:
+    """Compute success proportions per *unique* x-value with Wilson CI.
+
+    Unlike :func:`bin_proportions`, no binning is performed: each distinct
+    value of *x* becomes its own group, with ``proportions[i]`` the fraction
+    of ``success`` among observations where ``x == centers[i]``.
+
+    Parameters
+    ----------
+    x : array-like
+        Values to group by (e.g. gap values).
+    success : array-like
+        Binary outcomes (bool, 0, or 1) aligned with *x*.
+    alpha : float
+        Significance level for the CI (default 0.05 -> 95% CI).
+
+    Returns
+    -------
+    BinnedProportions
+    """
+    x = np.asarray(x, dtype=float)
+    success = np.asarray(success, dtype=float)
+
+    if x.size == 0:
+        empty: np.ndarray = np.array([], dtype=float)
+        return BinnedProportions(
+            empty, empty, empty, empty, np.array([], dtype=int), np.array([], dtype=int)
+        )
+
+    unique_vals, inverse = np.unique(x, return_inverse=True)
+    n_groups = len(unique_vals)
+
+    counts = np.zeros(n_groups, dtype=int)
+    totals = np.zeros(n_groups, dtype=int)
+    for i in range(n_groups):
+        mask = inverse == i
+        totals[i] = int(mask.sum())
+        counts[i] = int(success[mask].sum())
+
+    proportions = np.where(totals > 0, counts / totals, np.nan)
+    ci_low = np.full(n_groups, np.nan)
+    ci_high = np.full(n_groups, np.nan)
+    valid = totals > 0
+    if valid.any():
+        low, high = wilson_ci(counts[valid], totals[valid], alpha=alpha)
+        ci_low[valid] = low
+        ci_high[valid] = high
+
+    return BinnedProportions(
+        centers=unique_vals,
+        proportions=proportions,
+        ci_low=ci_low,
+        ci_high=ci_high,
+        counts=counts,
+        totals=totals,
+    )
+
+
 def shade_ci(
     ax: Axes,
     x: np.ndarray,

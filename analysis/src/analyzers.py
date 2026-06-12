@@ -36,12 +36,21 @@ from analysis.src.confidence import (
     bin_density,
     bin_proportions,
     shade_ci,
+    value_proportions,
     wilson_ci,
 )
 
 # plot_params keys consumed internally; not forwarded to matplotlib primitives.
 _INTERNAL_PLOT_PARAMS = frozenset(
-    {"bins", "alpha_ci", "shade_alpha", "round_digits", "use_negative_gap", "convert_db"}
+    {
+        "bins",
+        "alpha_ci",
+        "shade_alpha",
+        "round_digits",
+        "use_negative_gap",
+        "convert_db",
+        "use_linearize",
+    }
 )
 
 # Metrics for which gap → dB conversion is meaningful.
@@ -57,6 +66,23 @@ _DB_FACTOR: float = 10.0 / np.log(10.0)
 
 def _make_label(partition_keys: list[str], key_vals: tuple[Any, ...]) -> str:
     return ", ".join(f"{k}={v}" for k, v in zip(partition_keys, key_vals))
+
+
+def _logical_error_scatter_style(
+    partition_keys: list[str], key_vals: tuple[Any, ...]
+) -> dict[str, Any]:
+    """Return the fixed scatter style for logical/non-logical-error partitions."""
+    if "is_logical_error" not in partition_keys:
+        return {}
+
+    try:
+        is_error = bool(key_vals[partition_keys.index("is_logical_error")])
+    except (IndexError, ValueError):
+        return {}
+
+    if is_error:
+        return {"color": "red", "marker": "x"}
+    return {"color": "blue", "marker": "o"}
 
 
 def _effective_partition_keys(config: PlotConfig) -> list[str]:
@@ -177,6 +203,45 @@ def _validate_conditional_metric(metric_name: str) -> None:
         )
 
 
+def _split_axes(ax: Any) -> tuple[plt.Axes, plt.Axes]:
+    """Unpack ``ax`` into ``(ax_negative, ax_positive)`` for ``split_by_sign``."""
+    try:
+        ax_neg, ax_pos = ax
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "config.split_by_sign requires ax to be a 2-element sequence "
+            "(ax_negative, ax_positive)"
+        ) from exc
+    return ax_neg, ax_pos
+
+
+def _extrapolated_range(g: np.ndarray, factor: float) -> tuple[float, float]:
+    """Extend ``(g.min(), g.max())`` away from zero by *factor*.
+
+    For positive-valued ``g``, the upper bound is extended outward
+    (``g.max() * factor``). For negative-valued ``g``, the lower bound is
+    extended outward (``g.min() * factor``) so the result remains an
+    increasing ``(lo, hi)`` pair suitable for :func:`numpy.linspace`.
+    """
+    g_min, g_max = float(g.min()), float(g.max())
+    if g_max <= 0:
+        return g_min * factor, g_max
+    return g_min, g_max * factor
+
+
+def _split_by_sign(
+    df: pl.DataFrame,
+    metric_name: str,
+    ax_neg: plt.Axes,
+    ax_pos: plt.Axes,
+) -> list[tuple[str, plt.Axes, pl.DataFrame]]:
+    """Split *df* into non-positive (``<= 0``) and positive (``> 0``) groups."""
+    return [
+        ("neg", ax_neg, df.filter(pl.col(metric_name) <= 0)),
+        ("pos", ax_pos, df.filter(pl.col(metric_name) > 0)),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Post-selection result
 # ---------------------------------------------------------------------------
@@ -283,6 +348,8 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
     * ``"shade_alpha"`` – opacity of the CI shade (default 0.2).
     * ``"round_digits"`` – decimal digits for rounding (None disables).
     * ``"use_negative_gap"`` – flip logical-error shots negative (bool).
+    * ``"use_linearize"`` – for ``forced_gap_ml``, use the
+      ``linearize_logicalgap`` logical-error labels instead of the local ones.
 
     All other ``plot_params`` keys are forwarded to :func:`matplotlib.axes.Axes.scatter`.
     """
@@ -353,8 +420,13 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
                     label = _make_label(partition_keys, key_vals)
                     if multi_metric:
                         label = _metric_label(display_name, label)
+                    group_scatter_kw = dict(scatter_kw)
+                    if config.separate_logical_error:
+                        group_scatter_kw.update(
+                            _logical_error_scatter_style(partition_keys, key_vals)
+                        )
                     self._plot_group(
-                        ax, values, bins, alpha_ci, shade_alpha, scatter_kw, label=label
+                        ax, values, bins, alpha_ci, shade_alpha, group_scatter_kw, label=label
                     )
 
     def logical_error_rate(
@@ -842,7 +914,15 @@ class ConditionalLERAnalyzer:
         """
         metric_names = normalize_metric_names(config.metric_name)
         multi_metric = len(metric_names) > 1
-        style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
+
+        if config.split_by_sign:
+            ax_neg, ax_pos = _split_axes(ax)
+            style_maps = {
+                "neg": _metric_style_map(metric_names, ax_neg) if multi_metric else {},
+                "pos": _metric_style_map(metric_names, ax_pos) if multi_metric else {},
+            }
+        else:
+            style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
 
         for metric_name in metric_names:
             _validate_conditional_metric(metric_name)
@@ -850,23 +930,19 @@ class ConditionalLERAnalyzer:
             df = self._collect(lf, metric_config)
             display_name = config.metric_labels.get(metric_name, metric_name)
 
-            style = style_map.get(metric_name)
-            if not metric_config.group_by:
-                label = display_name if multi_metric else None
-                self._plot_ler_group(
-                    ax, df, metric_config, label=label, style=style
-                )
-            else:
-                partitions: dict[tuple, pl.DataFrame] = df.partition_by(
-                    metric_config.group_by, as_dict=True
-                )
-                for key_vals in sorted(partitions):
-                    label = _make_label(metric_config.group_by, key_vals)
-                    if multi_metric:
-                        label = _metric_label(display_name, label)
-                    self._plot_ler_group(
-                        ax, partitions[key_vals], metric_config, label=label, style=style
+            if config.split_by_sign:
+                for key, sub_ax, sub_df in _split_by_sign(df, metric_name, ax_neg, ax_pos):
+                    style = style_maps[key].get(metric_name)
+                    self._plot_partitions(
+                        sub_ax, sub_df, metric_config, display_name, multi_metric,
+                        style, self._plot_ler_group,
                     )
+            else:
+                style = style_map.get(metric_name)
+                self._plot_partitions(
+                    ax, df, metric_config, display_name, multi_metric,
+                    style, self._plot_ler_group,
+                )
 
     def plot_fitting(
         self,
@@ -892,7 +968,15 @@ class ConditionalLERAnalyzer:
 
         metric_names = normalize_metric_names(config.metric_name)
         multi_metric = len(metric_names) > 1
-        style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
+
+        if config.split_by_sign:
+            ax_neg, ax_pos = _split_axes(ax)
+            style_maps = {
+                "neg": _metric_style_map(metric_names, ax_neg) if multi_metric else {},
+                "pos": _metric_style_map(metric_names, ax_pos) if multi_metric else {},
+            }
+        else:
+            style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
 
         for metric_name in metric_names:
             _validate_conditional_metric(metric_name)
@@ -900,27 +984,47 @@ class ConditionalLERAnalyzer:
             df = self._collect(lf, metric_config)
             display_name = config.metric_labels.get(metric_name, metric_name)
 
-            style = style_map.get(metric_name)
-            if not metric_config.group_by:
-                label = display_name if multi_metric else None
-                self._plot_fitting_group(
-                    ax, df, metric_config, label=label, style=style
-                )
-            else:
-                partitions: dict[tuple, pl.DataFrame] = df.partition_by(
-                    metric_config.group_by, as_dict=True
-                )
-                for key_vals in sorted(partitions):
-                    label = _make_label(metric_config.group_by, key_vals)
-                    if multi_metric:
-                        label = _metric_label(display_name, label)
-                    self._plot_fitting_group(
-                        ax, partitions[key_vals], metric_config, label=label, style=style
+            if config.split_by_sign:
+                for key, sub_ax, sub_df in _split_by_sign(df, metric_name, ax_neg, ax_pos):
+                    style = style_maps[key].get(metric_name)
+                    self._plot_partitions(
+                        sub_ax, sub_df, metric_config, display_name, multi_metric,
+                        style, self._plot_fitting_group,
                     )
+            else:
+                style = style_map.get(metric_name)
+                self._plot_partitions(
+                    ax, df, metric_config, display_name, multi_metric,
+                    style, self._plot_fitting_group,
+                )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _plot_partitions(
+        self,
+        ax: plt.Axes,
+        df: pl.DataFrame,
+        config: ConditionalLERConfig,
+        display_name: str,
+        multi_metric: bool,
+        style: dict[str, Any] | None,
+        plot_fn: Any,
+    ) -> None:
+        """Group *df* by ``config.group_by`` (if any) and call *plot_fn* per group."""
+        if not config.group_by:
+            label = display_name if multi_metric else None
+            plot_fn(ax, df, config, label=label, style=style)
+        else:
+            partitions: dict[tuple, pl.DataFrame] = df.partition_by(
+                config.group_by, as_dict=True
+            )
+            for key_vals in sorted(partitions):
+                label = _make_label(config.group_by, key_vals)
+                if multi_metric:
+                    label = _metric_label(display_name, label)
+                plot_fn(ax, partitions[key_vals], config, label=label, style=style)
 
     def _collect(self, lf: pl.LazyFrame, config: ConditionalLERConfig) -> pl.DataFrame:
         needed = list(dict.fromkeys(
@@ -971,16 +1075,22 @@ class ConditionalLERAnalyzer:
         #     ax, bstats.centers, bstats.ci_low, bstats.ci_high,
         #     color=color, alpha=0.2,
         # )
+        err_valid = valid & (bstats.counts > 0) # CI is only valid where we have data
+        centers_valid = bstats.centers[err_valid]
+        p_valid = bstats.proportions[err_valid]
+        ci_low_valid = bstats.ci_low[err_valid]
+        ci_high_valid = bstats.ci_high[err_valid]
+        yerr_lower = np.clip(p_valid - ci_low_valid, 0, None)
+        yerr_upper = np.clip(ci_high_valid - p_valid, 0, None)
+        # centers = bstats.centers[valid]
+        # p = bstats.proportions[valid]
 
-        centers = bstats.centers[valid]
-        p = bstats.proportions[valid]
-
-        yerr_lower = np.clip(p - bstats.ci_low[valid], 0, None)
-        yerr_upper = np.clip(bstats.ci_high[valid] - p, 0, None)
+        # yerr_lower = np.clip(p - bstats.ci_low[valid], 0, None)
+        # yerr_upper = np.clip(bstats.ci_high[valid] - p, 0, None)
 
         ax.errorbar(
-            centers,
-            p,
+            centers_valid,
+            p_valid,
             yerr=[yerr_lower, yerr_upper],
             fmt='none',
             color=color,
@@ -988,7 +1098,10 @@ class ConditionalLERAnalyzer:
             alpha=0.8,
         )
 
-        if config.show_sigmoid_fit:
+        if config.show_sigmoid_fit and (
+            config.metric_name == "logical_gap"
+            or (config.metric_name == "linearize_logicalgap" and config.split_by_sign)
+        ):
             self._plot_sigmoid_fit_curve(ax, bstats, color, label)
 
     def _plot_sigmoid_fit_curve(
@@ -1014,7 +1127,8 @@ class ConditionalLERAnalyzer:
 
         k, l = np.polyfit(g, z, 1)
 
-        g_line = np.linspace(float(g.min()), float(g.max() * 1.5), 300)
+        lo, hi = _extrapolated_range(g, factor=10.0)
+        g_line = np.linspace(lo, hi, 300)
 
         y_line = 1.0 / (
             1.0 + np.exp(k * g_line + l)
@@ -1068,7 +1182,8 @@ class ConditionalLERAnalyzer:
             z_high = np.log((1.0 - ci_low_sel) / ci_low_sel)
             shade_ci(ax, g_ci, z_low, z_high, color=color, alpha=0.2)
 
-        g_line = np.linspace(float(g.min()), float(g.max() * 1.5), 300)
+        lo, hi = _extrapolated_range(g, factor=1.5)
+        g_line = np.linspace(lo, hi, 300)
         fit_label = (
             f"fit ({label + ', ' if label else ''}k={k:.3f}, l={l:.3f})"
         )
@@ -1081,48 +1196,5 @@ class ConditionalLERAnalyzer:
         config: ConditionalLERConfig,
     ) -> BinnedProportions:
         if config.bins is None:
-            return self._value_proportions(x, y, alpha=config.alpha)
+            return value_proportions(x, y, alpha=config.alpha)
         return bin_proportions(x, y, bins=config.bins, alpha=config.alpha)
-
-    def _value_proportions(
-        self,
-        x: np.ndarray,
-        y: np.ndarray,
-        alpha: float,
-    ) -> BinnedProportions:
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
-
-        if x.size == 0:
-            empty: np.ndarray = np.array([], dtype=float)
-            return BinnedProportions(
-                empty, empty, empty, empty, np.array([], dtype=int), np.array([], dtype=int)
-            )
-
-        unique_vals, inverse = np.unique(x, return_inverse=True)
-        n_groups = len(unique_vals)
-
-        counts = np.zeros(n_groups, dtype=int)
-        totals = np.zeros(n_groups, dtype=int)
-        for i in range(n_groups):
-            mask = inverse == i
-            totals[i] = int(mask.sum())
-            counts[i] = int(y[mask].sum())
-
-        proportions = np.where(totals > 0, counts / totals, np.nan)
-        ci_low = np.full(n_groups, np.nan)
-        ci_high = np.full(n_groups, np.nan)
-        valid = totals > 0
-        if valid.any():
-            low, high = wilson_ci(counts[valid], totals[valid], alpha=alpha)
-            ci_low[valid] = low
-            ci_high[valid] = high
-
-        return BinnedProportions(
-            centers=unique_vals,
-            proportions=proportions,
-            ci_low=ci_low,
-            ci_high=ci_high,
-            counts=counts,
-            totals=totals,
-        )

@@ -19,11 +19,36 @@ from decoder_confidence.execution.models import DecoderBase, DecoderFactory
 
 @dataclass(frozen=True)
 class LinearizeLogicalGapOptions:
-    """Options for the linearize_logicalgap metric. Extensible for future additions."""
+    """Options for the linearize_logicalgap metric."""
+
+    get_detail_stat: bool = False
 
 
 def _parse_linearize_options(metric_options: Mapping[str, Any]) -> LinearizeLogicalGapOptions:
-    return LinearizeLogicalGapOptions()
+    return LinearizeLogicalGapOptions(
+        get_detail_stat=bool(metric_options.get("get_detail_stat", False))
+    )
+
+
+def _normalize_true_obs(
+    true_obs: np.ndarray | None, num_shots: int, num_obs: int
+) -> np.ndarray | None:
+    if true_obs is None:
+        return None
+    true_obs_arr = np.asarray(true_obs, dtype=np.bool_)
+    if true_obs_arr.ndim == 1 and num_obs == 1:
+        true_obs_arr = true_obs_arr.reshape(-1, 1)
+    if true_obs_arr.shape != (num_shots, num_obs):
+        raise ValueError(
+            f"true_obs must have shape ({num_shots}, {num_obs}), got {true_obs_arr.shape}"
+        )
+    return true_obs_arr
+
+
+def _is_obs_flip(logical: np.ndarray, true_obs_shot: np.ndarray | None) -> bool:
+    if true_obs_shot is None:
+        return False
+    return bool(np.any(np.asarray(logical, dtype=np.bool_) != true_obs_shot))
 
 
 def _get_obs_row(observables: Any, i: int) -> np.ndarray:
@@ -81,7 +106,12 @@ class LinearizeLogicalGapDecoder(DecoderBase):
         self._num_errors: int = self.adapter.num_errors
         self._weights: np.ndarray = _weights_from_priors(self._base_priors)
 
-    def decode(self, syndromes: np.ndarray) -> DecodingResult:
+    def decode(
+        self,
+        syndromes: np.ndarray,
+        *,
+        true_obs: np.ndarray | None = None,
+    ) -> DecodingResult:
         syndromes = np.asarray(syndromes, dtype=int)
         if syndromes.ndim == 1:
             syndromes = syndromes.reshape(1, -1)
@@ -94,6 +124,15 @@ class LinearizeLogicalGapDecoder(DecoderBase):
         predictions = np.zeros((num_shots, num_obs), dtype=np.bool_)
         gap = np.full((num_shots,), np.nan, dtype=float)
         obs_flip_idx: list[list[int]] = []
+        true_obs_arr = _normalize_true_obs(true_obs, num_shots, num_obs)
+
+        if self.options.get_detail_stat:
+            if num_obs > 0 and true_obs_arr is None:
+                raise ValueError("true_obs is required when get_detail_stat=True")
+            stage1_weight = np.full((num_shots,), np.nan, dtype=float)
+            stage1_obs_flip = np.zeros((num_shots,), dtype=np.bool_)
+            stage2_weight = np.full((num_shots,), np.nan, dtype=float)
+            stage2_obs_flip = np.zeros((num_shots,), dtype=np.bool_)
 
         for shot in range(num_shots):
             syndrome = syndromes[shot]
@@ -106,6 +145,11 @@ class LinearizeLogicalGapDecoder(DecoderBase):
             l1 = _logical_from_correction(self._observables, c1)
             w1 = float(self._weights @ c1.astype(int))
             predictions[shot] = l1.astype(np.bool_)
+            obs_shot = true_obs_arr[shot] if true_obs_arr is not None else None
+
+            if self.options.get_detail_stat:
+                stage1_weight[shot] = w1
+                stage1_obs_flip[shot] = _is_obs_flip(l1, obs_shot)
 
             if num_obs == 0:
                 obs_flip_idx.append([])
@@ -113,6 +157,7 @@ class LinearizeLogicalGapDecoder(DecoderBase):
 
             # --- Stage 2: one decode per observable, forcing it to flip ---
             best_w2 = np.inf
+            best_l2: np.ndarray | None = None
             best_flip: list[int] = []
             for i in range(num_obs):
                 obs_row_i = _get_obs_row(self._observables, i)
@@ -129,6 +174,7 @@ class LinearizeLogicalGapDecoder(DecoderBase):
                 w2_i = float(self._weights @ c2.astype(int))
                 if w2_i < best_w2:
                     best_w2 = w2_i
+                    best_l2 = l2
                     # Indices where stage-2 logical class differs from stage-1
                     diff = np.asarray(l1, dtype=int) ^ np.asarray(l2, dtype=int)
                     best_flip = list(np.where(diff)[0])
@@ -139,10 +185,25 @@ class LinearizeLogicalGapDecoder(DecoderBase):
 
             gap[shot] = best_w2 - w1
             obs_flip_idx.append(best_flip)
+            if self.options.get_detail_stat:
+                stage2_weight[shot] = best_w2
+                if best_l2 is not None:
+                    stage2_obs_flip[shot] = _is_obs_flip(best_l2, obs_shot)
+
+        metrics: dict[str, Any] = {"linearize_logicalgap": gap}
+        if self.options.get_detail_stat:
+            metrics.update(
+                {
+                    "stage1_weight": stage1_weight,
+                    "stage1_obs_flip": stage1_obs_flip,
+                    "stage2_weight": stage2_weight,
+                    "stage2_obs_flip": stage2_obs_flip,
+                }
+            )
 
         return DecodingResult(
             predictions=predictions,
-            metrics={"linearize_logicalgap": gap},
+            metrics=metrics,
             obs_flip_idx=obs_flip_idx,
         )
 

@@ -76,6 +76,10 @@ class PostSelectSpec:
         For ``threshold_mode="continuous"`` only.  ``"linear"`` (default) for
         uniformly spaced quantiles; ``"log"`` to concentrate points near
         abort-rate = 0.
+    mark_zero_gap:
+        When ``True`` and ``metric_name == "linearize_logicalgap"``, overlay a
+        star marker at the operating point obtained by discarding all shots
+        with ``linearize_logicalgap <= 0``.
     """
 
     metric_name: str
@@ -88,6 +92,8 @@ class PostSelectSpec:
     round_digit: Optional[int] = None
     threshold_mode: str = "continuous"
     grid_scale: str = "linear"
+    use_linearize: bool = False
+    mark_zero_gap: bool = False
 
 
 @dataclass
@@ -99,6 +105,58 @@ class PostSelectCurve:
     ci_low: np.ndarray
     ci_high: np.ndarray
     accepted: np.ndarray
+
+
+def postselect_point_at_threshold(
+    values: np.ndarray,
+    is_error: np.ndarray,
+    threshold: float,
+    direction: str,
+    alpha: float = 0.05,
+    *,
+    inclusive: bool = True,
+) -> PostSelectCurve:
+    """Return the single operating point defined by a fixed threshold."""
+    if direction not in {"high", "low"}:
+        raise ValueError(f"direction must be 'high' or 'low', got {direction!r}")
+
+    values = np.asarray(values, dtype=float)
+    is_error = np.asarray(is_error, dtype=bool)
+    n_total = values.size
+
+    if n_total == 0:
+        empty_f = np.array([], dtype=float)
+        empty_i = np.array([], dtype=int)
+        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i)
+
+    if direction == "high":
+        mask = values >= threshold if inclusive else values > threshold
+    else:
+        mask = values <= threshold if inclusive else values < threshold
+
+    n_acc = int(mask.sum())
+    abort_rate = 1.0 - n_acc / n_total
+
+    if n_acc == 0:
+        nan = np.array([np.nan], dtype=float)
+        return PostSelectCurve(
+            abort_rates=np.array([abort_rate], dtype=float),
+            post_lers=nan,
+            ci_low=nan.copy(),
+            ci_high=nan.copy(),
+            accepted=np.array([0], dtype=int),
+        )
+
+    k_err = int(is_error[mask].sum())
+    post_ler = k_err / n_acc
+    lo, hi = wilson_ci(k_err, n_acc, alpha=alpha)
+    return PostSelectCurve(
+        abort_rates=np.array([abort_rate], dtype=float),
+        post_lers=np.array([post_ler], dtype=float),
+        ci_low=np.array([float(lo)], dtype=float),
+        ci_high=np.array([float(hi)], dtype=float),
+        accepted=np.array([n_acc], dtype=int),
+    )
 
 
 def postselect_curve_continuous(
@@ -354,6 +412,7 @@ class PostSelectionPlotter:
             filters=spec.filters,
             group_by=spec.group_by,
             batch_indices=spec.batch_indices,
+            extra_options={"use_linearize": spec.use_linearize},
         )
         lf = self.manager.query(plot_config)
 
@@ -442,7 +501,7 @@ class PostSelectionPlotter:
         if use_markers:
             line, = ax.plot(
                 curve.abort_rates[valid], y[valid],
-                marker="o", linestyle="-", label=label, **plot_kw,
+                marker="x", linestyle="-", label=label, **plot_kw,
             )
         else:
             line, = ax.plot(
@@ -452,4 +511,63 @@ class PostSelectionPlotter:
         shade_ci(
             ax, curve.abort_rates, ci_lo, ci_hi,
             color=line.get_color(), alpha=shade_alpha,
+        )
+        self._plot_zero_gap_marker(
+            ax=ax,
+            df=df,
+            spec=spec,
+            direction=direction,
+            alpha=alpha,
+            reduction_rate=reduction_rate,
+            original_ler=original_ler,
+            color=line.get_color(),
+        )
+
+    def _plot_zero_gap_marker(
+        self,
+        ax: plt.Axes,
+        df: pl.DataFrame,
+        spec: PostSelectSpec,
+        direction: str,
+        alpha: float,
+        reduction_rate: bool,
+        original_ler: float,
+        color: Any,
+    ) -> None:
+        if not spec.mark_zero_gap or spec.metric_name != "linearize_logicalgap":
+            return
+        if direction == "boolean":
+            return
+
+        sub = df.drop_nulls([spec.metric_name, "is_logical_error"])
+        if sub.height == 0:
+            return
+
+        values = sub[spec.metric_name].to_numpy().astype(float)
+        is_error = sub["is_logical_error"].to_numpy().astype(bool)
+        zero_gap = postselect_point_at_threshold(
+            values,
+            is_error,
+            threshold=0.0,
+            direction=direction,
+            alpha=alpha,
+            inclusive=False if direction == "high" else True,
+        )
+        if zero_gap.abort_rates.size == 0 or np.isnan(zero_gap.post_lers[0]):
+            return
+
+        y = float(zero_gap.post_lers[0])
+        if reduction_rate:
+            if not original_ler or original_ler <= 0:
+                return
+            y /= original_ler
+
+        ax.plot(
+            [float(zero_gap.abort_rates[0])],
+            [y],
+            marker="*",
+            linestyle="None",
+            color=color,
+            markersize=12,
+            label="_nolegend_",
         )

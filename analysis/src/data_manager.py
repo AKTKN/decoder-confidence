@@ -100,6 +100,18 @@ def _is_circuit_params_dir(name: str) -> bool:
     return "code" in kv and "d" in kv and "p" in kv
 
 
+def _use_linearized_logical_error(config: PlotConfig, metric_name: str) -> bool:
+    flag = bool(
+        config.plot_params.get("use_linearize", False)
+        or config.extra_options.get("use_linearize", False)
+    )
+    if flag and metric_name != "forced_gap_ml":
+        raise ValueError(
+            "use_linearize is only supported when metric_name='forced_gap_ml'"
+        )
+    return flag
+
+
 # ---------------------------------------------------------------------------
 # SimulationDataManager
 # ---------------------------------------------------------------------------
@@ -231,7 +243,12 @@ class SimulationDataManager:
             if config.batch_indices is not None and batch_idx not in config.batch_indices:
                 continue
 
-            le_file = dm_dir / f"logicalerror_batch={batch_idx}.parquet"
+            le_file = self._logicalerror_file_for_metric(
+                dm_dir=dm_dir,
+                config=config,
+                metric_name=metric_name,
+                batch_idx=batch_idx,
+            )
             if not le_file.exists():
                 continue
 
@@ -266,3 +283,53 @@ class SimulationDataManager:
         literal_exprs.append(pl.lit(batch_idx, dtype=pl.Int64).alias("batch"))
 
         return combined.with_columns(literal_exprs)
+
+    def _logicalerror_file_for_metric(
+        self,
+        dm_dir: Path,
+        config: PlotConfig,
+        metric_name: str,
+        batch_idx: int,
+    ) -> Path:
+        if not _use_linearized_logical_error(config, metric_name):
+            return dm_dir / f"logicalerror_batch={batch_idx}.parquet"
+
+        linearize_dir = self._find_linearize_metric_dir(dm_dir)
+        linearize_le_file = linearize_dir / f"logicalerror_batch={batch_idx}.parquet"
+        if not linearize_le_file.exists():
+            raise FileNotFoundError(
+                "use_linearize=True requested, but no matching "
+                f"linearize_logicalgap logicalerror file was found for batch={batch_idx} "
+                f"under {linearize_dir}"
+            )
+        return linearize_le_file
+
+    def _find_linearize_metric_dir(self, dm_dir: Path) -> Path:
+        decoding_dir = dm_dir.parent
+        current_params = _parse_kv(dm_dir.name)
+        decoder = _strip_quotes(current_params.get("decoder", ""))
+
+        candidates: list[Path] = []
+        for entry in sorted(decoding_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            params = _parse_kv(entry.name)
+            if _strip_quotes(params.get("metric", "")) != "linearize_logicalgap":
+                continue
+            if _strip_quotes(params.get("decoder", "")) != decoder:
+                continue
+            candidates.append(entry)
+
+        if not candidates:
+            raise FileNotFoundError(
+                "use_linearize=True requested, but no sibling "
+                f"linearize_logicalgap directory was found for decoder={decoder!r} "
+                f"next to {dm_dir}"
+            )
+        if len(candidates) > 1:
+            raise FileNotFoundError(
+                "use_linearize=True requested, but multiple sibling "
+                f"linearize_logicalgap directories were found for decoder={decoder!r}: "
+                + ", ".join(str(path) for path in candidates)
+            )
+        return candidates[0]

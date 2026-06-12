@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
+import inspect
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ def _run_task(
     bytes_per_shot: int,
     decoder_name: str,
     output_dir: Path,
+    decoder_accepts_true_obs: bool,
 ) -> WorkerResult:
     """Execute a single simulation task with the supplied decoder instance."""
     output_path = chunk_path(output_dir, task, decoder_name)
@@ -80,7 +82,10 @@ def _run_task(
         dets = data[:, :num_detectors]
         obs = data[:, num_detectors:]
 
-        result = decoder.decode(dets)
+        if decoder_accepts_true_obs and num_observables > 0:
+            result = decoder.decode(dets, true_obs=obs)
+        else:
+            result = decoder.decode(dets)
         predictions = _normalize_predictions(result.predictions, task.num_shots, num_observables)
 
         if num_observables > 0:
@@ -176,6 +181,12 @@ def run_manager_threaded(config: ExecutionConfig) -> RunOutcome:
 
     probe_decoder = factory.build_decoder(shared_env, dem)
     decoder_name = probe_decoder.__class__.__name__
+    try:
+        decoder_accepts_true_obs = "true_obs" in inspect.signature(
+            probe_decoder.decode
+        ).parameters
+    except (TypeError, ValueError):
+        decoder_accepts_true_obs = False
 
     probe_task = SimulationTask(
         dets_path=probe_info.path,
@@ -192,6 +203,7 @@ def run_manager_threaded(config: ExecutionConfig) -> RunOutcome:
         bytes_per_shot=bps,
         decoder_name=decoder_name,
         output_dir=config.output_dir,
+        decoder_accepts_true_obs=decoder_accepts_true_obs,
     )
     if probe_result.status != "ok":
         raise RuntimeError(f"Probe task failed: {probe_result.message}")
@@ -246,6 +258,7 @@ def run_manager_threaded(config: ExecutionConfig) -> RunOutcome:
             bytes_per_shot=bps,
             decoder_name=decoder_name,
             output_dir=config.output_dir,
+            decoder_accepts_true_obs=decoder_accepts_true_obs,
         )
 
     # Progress tracking and chunk-merge — mirrors manager.py logic.
