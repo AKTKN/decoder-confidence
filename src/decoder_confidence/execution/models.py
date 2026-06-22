@@ -145,7 +145,7 @@ class ExecutionConfig:
     verbose: bool = False
     max_chunk_files: int | None = 1000
     merge_chunk_group_size: int | None = None
-    timeout_multiplier: float = 10.0
+    timeout_multiplier: float = 100000.0
     min_task_timeout_s: float = 60.0
     max_task_retries: int = 1
     maxtasksperchild: int | None = 50
