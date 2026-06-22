@@ -1,0 +1,8 @@
+decoder: RELAY-BP
+metric: forcing_degradation_test
+
+decoder_options:
+  # Relay-BP options are passed directly to relay_bp.bp.RelayDecoderF64.
+  set_max_iter: 30
+
+metric_options: {}

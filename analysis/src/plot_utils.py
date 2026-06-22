@@ -35,6 +35,20 @@ from analysis.src.data_manager import SimulationDataManager
 from analysis.src.figure_style import finalize_axes
 from analysis.src.postselect import PostSelectionPlotter, PostSelectSpec
 from analysis.src.relative_improvement import RelativeImprovementPlotter, RelImprovSpec
+from analysis.src.ranking_degradation import (
+    RankingAnalysisConfig,
+    RankingDegradationAnalyzer,
+    RankingMetricName,
+    ScoreName,
+    ThresholdRejectionSet,
+)
+from analysis.src.stage_gap_difference import (
+    GapDifferenceStat,
+    OverrideThresholdGap,
+    Stage1GapDifferenceAnalyzer,
+    Stage1GapDifferenceConfig,
+    Stage1WeightCase,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -251,4 +265,186 @@ def draw_override_gap_histogram(
     """
     return OverrideProbabilityAnalyzer().plot_override_gap_histogram(
         manager, config, ax, bar_kw=bar_kw,
+    )
+
+
+def draw_stage1_gap_difference_by_logical_gap(
+    manager: SimulationDataManager,
+    config: Stage1GapDifferenceConfig,
+    ax: plt.Axes,
+    *,
+    stat_name: GapDifferenceStat = "MAE",
+    bar_kw: dict[str, Any] | None = None,
+) -> plt.Axes:
+    """Draw a bar chart of Δ_fg − Δ_ex statistics conditioned on logical_gap."""
+    return Stage1GapDifferenceAnalyzer().plot_stat_by_logical_gap(
+        manager,
+        config,
+        ax,
+        stat_name=stat_name,
+        bar_kw=bar_kw,
+    )
+
+
+def draw_stage1_logical_gap_distribution(
+    manager: SimulationDataManager,
+    config: Stage1GapDifferenceConfig,
+    ax: plt.Axes,
+    *,
+    stage1_weight_cases: Sequence[Stage1WeightCase] = ("all",),
+    normalize: bool = False,
+    bar_kw: dict[str, Any] | None = None,
+) -> plt.Axes:
+    """Draw logical_gap distributions split by stage-1 weight case."""
+    return Stage1GapDifferenceAnalyzer().plot_logical_gap_distribution(
+        manager,
+        config,
+        ax,
+        stage1_weight_cases=stage1_weight_cases,
+        normalize=normalize,
+        bar_kw=bar_kw,
+    )
+
+
+def draw_stage1_forced_gap_conditional_heatmap(
+    manager: SimulationDataManager,
+    config: Stage1GapDifferenceConfig,
+    ax: plt.Axes,
+    *,
+    cmap: str = "viridis",
+    add_colorbar: bool = True,
+    colorbar_label: str = r"$P(\Delta_{\rm fg}\mid\Delta_{\rm ex})$",
+    signed_by_logical_error: bool = False,
+) -> plt.Axes:
+    """Draw a log-normalized heatmap of P(Δ_fg | Δ_ex)."""
+    return Stage1GapDifferenceAnalyzer().plot_forced_gap_conditional_heatmap(
+        manager,
+        config,
+        ax,
+        cmap=cmap,
+        add_colorbar=add_colorbar,
+        colorbar_label=colorbar_label,
+        signed_by_logical_error=signed_by_logical_error,
+    )
+
+
+def draw_override_threshold_logical_error_curve(
+    manager: SimulationDataManager,
+    config: Stage1GapDifferenceConfig,
+    ax: plt.Axes,
+    *,
+    gap_name: OverrideThresholdGap = "forced_gap_ml",
+    thresholds: Sequence[float] | None = None,
+    plot_kw: dict[str, Any] | None = None,
+) -> plt.Axes:
+    """Draw conditional logical-error rate vs gap threshold inside override shots."""
+    return Stage1GapDifferenceAnalyzer().plot_override_threshold_logical_error_curve(
+        manager,
+        config,
+        ax,
+        gap_name=gap_name,
+        thresholds=thresholds,
+        plot_kw=plot_kw,
+    )
+
+
+def draw_ranking_degradation(
+    manager: SimulationDataManager,
+    config: RankingAnalysisConfig,
+    ax: plt.Axes,
+    *,
+    metrics: Sequence[RankingMetricName] = (
+        "forced_only_fraction",
+        "jaccard_distance",
+        "symmetric_difference_fraction",
+    ),
+    exact_score: ScoreName = "exact_gap",
+    comparison_score: ScoreName = "forced_gap",
+) -> plt.Axes:
+    """Draw abort-rate based accepted-set degradation metrics."""
+    return RankingDegradationAnalyzer().plot_ranking_degradation(
+        manager,
+        config,
+        ax,
+        metrics=metrics,
+        exact_score=exact_score,
+        comparison_score=comparison_score,
+    )
+
+
+def draw_ranking_postselection_curves(
+    manager: SimulationDataManager,
+    config: RankingAnalysisConfig,
+    ax: plt.Axes,
+    *,
+    error_source: str = "score_default",
+    shade_ci: bool = True,
+) -> plt.Axes:
+    """Draw post-selected LER curves for ranking scores."""
+    return RankingDegradationAnalyzer().plot_postselection_curves(
+        manager,
+        config,
+        ax,
+        error_source=error_source,  # type: ignore[arg-type]
+        shade_ci=shade_ci,
+    )
+
+
+def draw_false_safe_case_fractions(
+    manager: SimulationDataManager,
+    config: RankingAnalysisConfig,
+    ax: plt.Axes,
+    *,
+    abort_rates: Sequence[float],
+    exact_score: ScoreName = "exact_gap",
+    comparison_score: ScoreName = "forced_gap",
+) -> plt.Axes:
+    """Draw indicator fractions inside shots accepted only by the comparison score."""
+    return RankingDegradationAnalyzer().plot_false_safe_case_fractions(
+        manager,
+        config,
+        ax,
+        abort_rates=abort_rates,
+        exact_score=exact_score,
+        comparison_score=comparison_score,
+    )
+
+
+def draw_gap_threshold_rejection_fractions(
+    manager: SimulationDataManager,
+    config: RankingAnalysisConfig,
+    ax: plt.Axes,
+    *,
+    thresholds: Sequence[float] | None = None,
+    forced_logical_error: bool | None = None,
+    sets: Sequence[ThresholdRejectionSet] = (
+        "both_rejected",
+        "overconfident",
+        "underconfident",
+    ),
+) -> plt.Axes:
+    """Draw threshold-based rejection-set fractions normalized by forced rejects."""
+    return RankingDegradationAnalyzer().plot_gap_threshold_rejection_fractions(
+        manager,
+        config,
+        ax,
+        thresholds=thresholds,
+        forced_logical_error=forced_logical_error,
+        sets=sets,
+    )
+
+
+def draw_gap_threshold_case_fractions(
+    manager: SimulationDataManager,
+    config: RankingAnalysisConfig,
+    ax: plt.Axes,
+    *,
+    threshold: float,
+) -> plt.Axes:
+    """Draw stage/override category fractions for one logical-gap threshold."""
+    return RankingDegradationAnalyzer().plot_gap_threshold_case_fractions(
+        manager,
+        config,
+        ax,
+        threshold=threshold,
     )

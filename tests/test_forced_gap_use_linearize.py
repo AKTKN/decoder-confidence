@@ -7,6 +7,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
 
 from analysis.src.config import PlotConfig
@@ -88,7 +89,7 @@ def test_postselect_spec_passes_use_linearize_to_plot_config() -> None:
     plt.close(fig)
 
 
-def test_postselect_mark_zero_gap_adds_star_without_legend_entry() -> None:
+def test_postselect_mark_zero_gap_skips_star_when_no_logical_errors_remain() -> None:
     class DummyManager:
         def query(self, config: PlotConfig) -> pl.LazyFrame:
             return pl.DataFrame(
@@ -106,10 +107,34 @@ def test_postselect_mark_zero_gap_adds_star_without_legend_entry() -> None:
 
     PostSelectionPlotter(DummyManager()).plot([spec], ax, num_points=3)
 
+    assert len(ax.lines) == 1
+    line = ax.lines[0]
+    assert np.isnan(line.get_ydata()[1:]).all()
+    plt.close(fig)
+
+
+def test_postselect_mark_zero_gap_adds_star_without_legend_entry() -> None:
+    class DummyManager:
+        def query(self, config: PlotConfig) -> pl.LazyFrame:
+            return pl.DataFrame(
+                {
+                    "linearize_logicalgap": [-1.0, 0.0, 1.0, 2.0],
+                    "is_logical_error": [False, False, True, False],
+                }
+            ).lazy()
+
+    fig, ax = plt.subplots()
+    spec = PostSelectSpec(
+        metric_name="linearize_logicalgap",
+        mark_zero_gap=True,
+    )
+
+    PostSelectionPlotter(DummyManager()).plot([spec], ax, num_points=3)
+
     assert len(ax.lines) == 2
     star_line = ax.lines[1]
     assert star_line.get_marker() == "*"
     assert star_line.get_label() == "_nolegend_"
     assert list(star_line.get_xdata()) == [0.5]
-    assert list(star_line.get_ydata()) == [0.0]
+    assert list(star_line.get_ydata()) == [0.5]
     plt.close(fig)

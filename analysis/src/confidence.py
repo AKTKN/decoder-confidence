@@ -246,5 +246,5 @@ def shade_ci(
     """
     valid = ~(np.isnan(x) | np.isnan(ci_low) | np.isnan(ci_high))
     if valid.any():
-        ax.fill_between(x[valid], ci_low[valid], ci_high[valid],
+        ax.fill_between(x, ci_low, ci_high, where=valid,
                         alpha=alpha, color=color)

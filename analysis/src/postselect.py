@@ -105,6 +105,7 @@ class PostSelectCurve:
     ci_low: np.ndarray
     ci_high: np.ndarray
     accepted: np.ndarray
+    logical_errors: np.ndarray
 
 
 def postselect_point_at_threshold(
@@ -127,7 +128,7 @@ def postselect_point_at_threshold(
     if n_total == 0:
         empty_f = np.array([], dtype=float)
         empty_i = np.array([], dtype=int)
-        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i)
+        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i, empty_i)
 
     if direction == "high":
         mask = values >= threshold if inclusive else values > threshold
@@ -145,6 +146,7 @@ def postselect_point_at_threshold(
             ci_low=nan.copy(),
             ci_high=nan.copy(),
             accepted=np.array([0], dtype=int),
+            logical_errors=np.array([0], dtype=int),
         )
 
     k_err = int(is_error[mask].sum())
@@ -156,6 +158,7 @@ def postselect_point_at_threshold(
         ci_low=np.array([float(lo)], dtype=float),
         ci_high=np.array([float(hi)], dtype=float),
         accepted=np.array([n_acc], dtype=int),
+        logical_errors=np.array([k_err], dtype=int),
     )
 
 
@@ -198,7 +201,7 @@ def postselect_curve_continuous(
     if n_total == 0:
         empty_f = np.array([], dtype=float)
         empty_i = np.array([], dtype=int)
-        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i)
+        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i, empty_i)
 
     if grid_scale == "log":
         # Concentrate points near abort-rate = 0; include 0 explicitly.
@@ -212,6 +215,7 @@ def postselect_curve_continuous(
     ci_low = np.full(num_points, np.nan)
     ci_high = np.full(num_points, np.nan)
     accepted = np.zeros(num_points, dtype=int)
+    logical_errors = np.zeros(num_points, dtype=int)
 
     for i, r in enumerate(abort_grid):
         if direction == "high":
@@ -229,6 +233,7 @@ def postselect_curve_continuous(
             continue
 
         k_err = int(is_error[mask].sum())
+        logical_errors[i] = k_err
         post_lers[i] = k_err / n_acc
         lo, hi = wilson_ci(k_err, n_acc, alpha=alpha)
         ci_low[i] = float(lo)
@@ -241,6 +246,7 @@ def postselect_curve_continuous(
         ci_low=ci_low[order],
         ci_high=ci_high[order],
         accepted=accepted[order],
+        logical_errors=logical_errors[order],
     )
 
 
@@ -274,7 +280,7 @@ def postselect_curve_unique_thresholds(
     if n_total == 0:
         empty_f = np.array([], dtype=float)
         empty_i = np.array([], dtype=int)
-        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i)
+        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i, empty_i)
 
     unique_vals = np.unique(values)
 
@@ -293,21 +299,22 @@ def postselect_curve_unique_thresholds(
         k_err = int(is_error[mask].sum())
         post_ler = k_err / n_acc
         lo, hi = wilson_ci(k_err, n_acc, alpha=alpha)
-        rows.append((abort, post_ler, float(lo), float(hi), n_acc))
+        rows.append((abort, post_ler, float(lo), float(hi), n_acc, k_err))
 
     if not rows:
         empty_f = np.array([], dtype=float)
         empty_i = np.array([], dtype=int)
-        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i)
+        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i, empty_i)
 
     rows.sort(key=lambda r: r[0])
-    abort_arr, ler_arr, lo_arr, hi_arr, acc_arr = zip(*rows)
+    abort_arr, ler_arr, lo_arr, hi_arr, acc_arr, err_arr = zip(*rows)
     return PostSelectCurve(
         abort_rates=np.array(abort_arr, dtype=float),
         post_lers=np.array(ler_arr, dtype=float),
         ci_low=np.array(lo_arr, dtype=float),
         ci_high=np.array(hi_arr, dtype=float),
         accepted=np.array(acc_arr, dtype=int),
+        logical_errors=np.array(err_arr, dtype=int),
     )
 
 
@@ -349,27 +356,28 @@ def postselect_curve_ar(
 
         abort = 1.0 - n_acc / n_total
         if n_acc == 0:
-            rows.append((b_val, abort, np.nan, np.nan, np.nan, 0))
+            rows.append((b_val, abort, np.nan, np.nan, np.nan, 0, 0))
             continue
 
         k_err = int(is_err[accept].sum())
         post_ler = k_err / n_acc
         lo, hi = wilson_ci(k_err, n_acc, alpha=alpha)
-        rows.append((b_val, abort, post_ler, float(lo), float(hi), n_acc))
+        rows.append((b_val, abort, post_ler, float(lo), float(hi), n_acc, k_err))
 
     if not rows:
         empty_f = np.array([], dtype=float)
         empty_i = np.array([], dtype=int)
-        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i)
+        return PostSelectCurve(empty_f, empty_f, empty_f, empty_f, empty_i, empty_i)
 
     rows.sort(key=lambda r: r[1])
-    _, abort, ler, lo, hi, acc = zip(*rows)
+    _, abort, ler, lo, hi, acc, err = zip(*rows)
     return PostSelectCurve(
         abort_rates=np.array(abort, dtype=float),
         post_lers=np.array(ler, dtype=float),
         ci_low=np.array(lo, dtype=float),
         ci_high=np.array(hi, dtype=float),
         accepted=np.array(acc, dtype=int),
+        logical_errors=np.array(err, dtype=int),
     )
 
 
@@ -496,16 +504,23 @@ class PostSelectionPlotter:
             else:
                 return
 
-        valid = ~np.isnan(y)
+        has_logical_error = curve.logical_errors > 0
+        y = np.where(has_logical_error, y, np.nan)
+        ci_lo = np.where(has_logical_error, ci_lo, np.nan)
+        ci_hi = np.where(has_logical_error, ci_hi, np.nan)
+
+        valid = ~(np.isnan(y) | np.isnan(curve.abort_rates))
+        if not valid.any():
+            return
         use_markers = direction == "boolean" or spec.threshold_mode == "unique"
         if use_markers:
             line, = ax.plot(
-                curve.abort_rates[valid], y[valid],
+                curve.abort_rates, y,
                 marker="x", linestyle="-", label=label, **plot_kw,
             )
         else:
             line, = ax.plot(
-                curve.abort_rates[valid], y[valid],
+                curve.abort_rates, y,
                 label=label, **plot_kw,
             )
         shade_ci(
@@ -553,7 +568,11 @@ class PostSelectionPlotter:
             alpha=alpha,
             inclusive=False if direction == "high" else True,
         )
-        if zero_gap.abort_rates.size == 0 or np.isnan(zero_gap.post_lers[0]):
+        if (
+            zero_gap.abort_rates.size == 0
+            or np.isnan(zero_gap.post_lers[0])
+            or zero_gap.logical_errors[0] <= 0
+        ):
             return
 
         y = float(zero_gap.post_lers[0])

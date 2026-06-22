@@ -1,0 +1,14 @@
+decoder: BP-LSD
+metric: forcing_degradation_test
+
+decoder_options:
+  # Number of BP iterations before LSD fallback.
+  max_iter: 30
+  # BP scheduling method: "flooding" or "min_sum".
+  bp_method: min_sum
+  # LSD order: 0 corresponds to LSD-0 and is the fastest option.
+  lsd_order: 0
+
+metric_options:
+  # Alpha-norm order for cluster_llr. Use "inf" for the max-cluster variant.
+  alpha: 2.0

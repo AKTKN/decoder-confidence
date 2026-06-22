@@ -12,6 +12,10 @@ from decoder_confidence.decoding._argument_reweighting import (
 from decoder_confidence.decoding._ilp_logicalgap import make_ilp_decoder_factory
 from decoder_confidence.decoding._ilp_cplex_logicalgap import make_cplex_decoder_factory
 from decoder_confidence.decoding._forced_gap import make_forced_gap_ml_factory
+from decoder_confidence.decoding._forcing_degradation_test import (
+    FORCING_DEGRADATION_METRIC,
+    make_forcing_degradation_test_factory,
+)
 from decoder_confidence.decoding._linearize_logicalgap import (
     make_linearize_logicalgap_factory,
 )
@@ -63,6 +67,23 @@ def load_decoder_factory(
 
     decoder_name = str(decoder).strip().upper()
     metric_name = str(metric).strip().lower()
+
+    if metric_name == FORCING_DEGRADATION_METRIC:
+        factory = make_forcing_degradation_test_factory(
+            dem_path,
+            decoder_name,
+            decoder_options,
+            metric_options,
+        )
+        info = DecoderConfigInfo(
+            decoder_name=decoder_name,
+            metric_name=metric_name,
+            decoder_options=dict(decoder_options),
+            metric_options=dict(metric_options),
+            config_path=config_path,
+            raw_config=dict(config),
+        )
+        return factory, info
 
     if metric_name in {"ar-pec", "ar_lec", "ar-lec", "ar_pec"}:
         factory = make_argument_reweighting_factory(
