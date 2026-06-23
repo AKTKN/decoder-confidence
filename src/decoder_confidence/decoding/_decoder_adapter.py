@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import inspect
 from typing import Any, Mapping
 
 import numpy as np
@@ -588,6 +589,20 @@ def _build_relay_decoder(
     gamma_dist = options.get("gamma_dist_interval")
     if gamma_dist is not None:
         options["gamma_dist_interval"] = tuple(gamma_dist)
+
+    try:
+        signature = inspect.signature(RelayDecoderF64)
+    except (TypeError, ValueError):  # pragma: no cover - defensive for pybind changes
+        signature = None
+    if signature is not None:
+        allowed = set(signature.parameters)
+        unknown = sorted(set(options) - allowed)
+        if unknown:
+            raise ValueError(
+                "Unsupported relay-bp decoder option(s): "
+                + ", ".join(unknown)
+                + f". Supported options: {', '.join(sorted(allowed))}"
+            )
 
     return RelayDecoderF64(
         check_matrix=check_matrix,

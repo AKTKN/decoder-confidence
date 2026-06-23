@@ -219,6 +219,7 @@ def _run_manager_multiprocess(config: ExecutionConfig) -> RunOutcome:
             task_timeout_s=task_timeout_s,
             max_retries=config.max_task_retries,
             on_result=_on_result,
+            abort_on_error=True,
         )
 
     return outcome

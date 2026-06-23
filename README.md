@@ -25,7 +25,3 @@ Post-selection性能の図面
 
 
 ExactとForcedのgap散布図（これphenomenologicalだとgapの値が離散的になるため、頻度も情報として含めたい場合どういう図面が良いか？）
-
-
-
-（）

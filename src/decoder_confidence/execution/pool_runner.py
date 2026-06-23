@@ -26,6 +26,7 @@ def run_pool_tasks(
     max_retries: int,
     poll_interval_s: float = 1.0,
     on_result: Callable[[WorkerResult], None] | None = None,
+    abort_on_error: bool = False,
 ) -> RunOutcome:
     """Run ``tasks`` via ``pool.apply_async``, detecting hangs/timeouts.
 
@@ -43,7 +44,8 @@ def run_pool_tasks(
       to share a pool generation with the culprit. This bounds the total
       number of pool-recreation cycles to at most
       ``len(tasks) * (max_retries + 1)``.
-    - Tasks whose worker raised an exception (``status == "error"``) are
+    - Tasks whose worker raised an exception (``status == "error"``) either
+      abort the whole run immediately when ``abort_on_error`` is true, or are
       retried up to ``max_retries`` times (without needing a pool restart)
       before being recorded as an ``IncompleteRange(reason="error", ...)``.
     - Tasks that exhaust their retries (timeout or error) are converted to
@@ -51,8 +53,9 @@ def run_pool_tasks(
       synthetic ``status="error"`` ``WorkerResult`` (with ``output_path =
       Path()``, which is never read for non-ok/skipped statuses) so callers'
       existing progress-counting/printing logic needs no special-casing.
-    - Never raises for partial failure. Returns once every task has either
-      succeeded, been skipped, or been converted to an ``IncompleteRange``.
+    - When ``abort_on_error`` is false, never raises for partial failure.
+      Returns once every task has either succeeded, been skipped, or been
+      converted to an ``IncompleteRange``.
     """
     results: list[WorkerResult] = []
     incomplete: list[IncompleteRange] = []
@@ -94,6 +97,13 @@ def run_pool_tasks(
                         if on_result is not None:
                             on_result(result)
                     else:  # "error"
+                        if abort_on_error:
+                            current_pool.terminate()
+                            current_pool.join()
+                            raise RuntimeError(
+                                f"Worker task failed for batch_id={task.batch_id}: "
+                                f"{result.message}"
+                            )
                         if attempt <= max_retries:
                             next_pending.append((task, attempt + 1))
                         else:

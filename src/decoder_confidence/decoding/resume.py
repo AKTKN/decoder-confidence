@@ -729,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
                     task_timeout_s=task_timeout_s,
                     max_retries=args.max_task_retries,
                     on_result=_on_result,
+                    abort_on_error=True,
                 )
     else:
         print("[resume] All shots already complete. Skipping decoding, running collection only.")

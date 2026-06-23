@@ -4,6 +4,7 @@ import inspect
 import multiprocessing as mp
 import os
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ class WorkerState:
 
 
 _STATE: WorkerState | None = None
+_INIT_ERROR: str | None = None
 
 
 def _apply_affinity(core_ids: tuple[int, ...] | None) -> None:
@@ -75,33 +77,41 @@ def _build_decoder(factory: DecoderFactory, dem: stim.DetectorErrorModel) -> Any
 
 
 def init_worker(config: WorkerConfig) -> None:
-    global _STATE
+    global _STATE, _INIT_ERROR
 
-    _apply_affinity(config.core_ids)
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-
-    dem = stim.DetectorErrorModel.from_file(str(config.dem_path))
-    num_detectors, num_observables = _get_dem_counts(dem)
-    bytes_per_shot = (num_detectors + num_observables + 7) // 8
-
-    decoder = _build_decoder(config.decoder_factory, dem)
-    decoder_name = decoder.__class__.__name__
+    _STATE = None
+    _INIT_ERROR = None
 
     try:
-        decoder_accepts_true_obs = "true_obs" in inspect.signature(decoder.decode).parameters
-    except (TypeError, ValueError):
-        decoder_accepts_true_obs = False
+        _apply_affinity(config.core_ids)
+        config.output_dir.mkdir(parents=True, exist_ok=True)
 
-    _STATE = WorkerState(
-        dem=dem,
-        num_detectors=num_detectors,
-        num_observables=num_observables,
-        bytes_per_shot=bytes_per_shot,
-        decoder=decoder,
-        decoder_name=decoder_name,
-        output_dir=config.output_dir,
-        decoder_accepts_true_obs=decoder_accepts_true_obs,
-    )
+        dem = stim.DetectorErrorModel.from_file(str(config.dem_path))
+        num_detectors, num_observables = _get_dem_counts(dem)
+        bytes_per_shot = (num_detectors + num_observables + 7) // 8
+
+        decoder = _build_decoder(config.decoder_factory, dem)
+        decoder_name = decoder.__class__.__name__
+
+        try:
+            decoder_accepts_true_obs = (
+                "true_obs" in inspect.signature(decoder.decode).parameters
+            )
+        except (TypeError, ValueError):
+            decoder_accepts_true_obs = False
+
+        _STATE = WorkerState(
+            dem=dem,
+            num_detectors=num_detectors,
+            num_observables=num_observables,
+            bytes_per_shot=bytes_per_shot,
+            decoder=decoder,
+            decoder_name=decoder_name,
+            output_dir=config.output_dir,
+            decoder_accepts_true_obs=decoder_accepts_true_obs,
+        )
+    except Exception:
+        _INIT_ERROR = traceback.format_exc()
 
 
 def read_b8_slice(
@@ -192,7 +202,15 @@ def _normalize_metrics(metrics: dict[str, Any], num_shots: int) -> dict[str, np.
 
 def run_task(task: SimulationTask) -> WorkerResult:
     if _STATE is None:
-        raise RuntimeError("Worker not initialized. Call init_worker first.")
+        message = _INIT_ERROR or "Worker not initialized. Call init_worker first."
+        return WorkerResult(
+            status="error",
+            duration_s=0.0,
+            output_path=Path(),
+            num_shots=task.num_shots,
+            batch_id=task.batch_id,
+            message=message,
+        )
 
     output_path = chunk_path(_STATE.output_dir, task, _STATE.decoder_name)
     if output_path.exists():

@@ -10,6 +10,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
+
 from decoder_confidence.execution.models import (
     SimulationTask,
     WorkerConfig,
@@ -190,6 +192,32 @@ def test_run_pool_tasks_error_exhausts_retries():
     statuses_by_batch = {r.batch_id: r.status for r in seen_results}
     assert statuses_by_batch[ok_task.batch_id] == "ok"
     assert statuses_by_batch[err_task.batch_id] == "error"
+
+
+def test_run_pool_tasks_abort_on_first_worker_error():
+    err_task = _make_task(batch_id=1)
+
+    def script(task: SimulationTask) -> _FakeAsyncResult:
+        return _FakeAsyncResult(ready_after=0.0, value=_error_result(task, "boom"))
+
+    pool = _FakePool(script)
+    ctx = _FakeCtx(script)
+
+    with pytest.raises(RuntimeError, match="Worker task failed.*boom"):
+        run_pool_tasks(
+            [err_task],
+            pool=pool,
+            ctx=ctx,
+            worker_config=_dummy_worker_config(),
+            num_workers=2,
+            maxtasksperchild=None,
+            task_timeout_s=10.0,
+            max_retries=1,
+            poll_interval_s=0.01,
+            abort_on_error=True,
+        )
+
+    assert pool.terminate_count == 1
 
 
 def test_run_pool_tasks_timeout_with_collateral_requeue():
