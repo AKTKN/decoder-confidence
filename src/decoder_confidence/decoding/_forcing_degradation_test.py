@@ -98,6 +98,7 @@ class StageDecode:
     logical_class: np.ndarray
     weight: float
     metric: float | int
+    converged: bool = True
 
 
 class ForcingStageRunner(Protocol):
@@ -189,6 +190,7 @@ class BpLsdForcingStageRunner:
             logical_class=logical.astype(np.bool_),
             weight=weight,
             metric=float(metric),
+            converged=True,
         )
 
     def decode_baseline(self, syndrome: np.ndarray) -> StageDecode:
@@ -241,6 +243,7 @@ class RelayBpForcingStageRunner:
             logical_class=logical.astype(np.bool_),
             weight=weight,
             metric=int(result.iterations),
+            converged=bool(result.success),
         )
 
     def decode_baseline(self, syndrome: np.ndarray) -> StageDecode:
@@ -308,6 +311,7 @@ class ForcingDegradationTestDecoder(DecoderBase):
         metric_name = self.runner.metric_name
 
         predictions = np.zeros((num_shots, num_obs), dtype=np.bool_)
+        force_logical_error = np.zeros(num_shots, dtype=np.bool_)
         baseline_weight = np.zeros(num_shots, dtype=np.float64)
         forced_weight = np.zeros(num_shots, dtype=np.float64)
         if metric_name == "iteration":
@@ -323,7 +327,10 @@ class ForcingDegradationTestDecoder(DecoderBase):
                 baseline = self.runner.decode_baseline(syndrome)
                 forced = self.runner.decode_forced(syndrome, baseline.logical_class)
 
-                if not np.array_equal(forced.logical_class, baseline.logical_class):
+                both_converged = baseline.converged and forced.converged
+                if not both_converged:
+                    force_logical_error[shot] = True
+                elif not np.array_equal(forced.logical_class, baseline.logical_class):
                     baseline_bits = baseline.logical_class.astype(int).tolist()
                     forced_bits = forced.logical_class.astype(int).tolist()
                     raise RuntimeError(
@@ -347,6 +354,7 @@ class ForcingDegradationTestDecoder(DecoderBase):
                 "forced_weight": forced_weight,
                 f"baseline_{metric_name}": baseline_metric,
                 f"forced_{metric_name}": forced_metric,
+                "__is_logical_error": force_logical_error,
             },
         )
 

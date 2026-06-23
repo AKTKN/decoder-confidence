@@ -42,6 +42,7 @@ class _FakeRunner:
             if forced_logical is None
             else forced_logical
         )
+        self.force_nonconverged = False
         self.forced_target: np.ndarray | None = None
         self.reset_called = False
 
@@ -64,6 +65,7 @@ class _FakeRunner:
             logical_class=self.forced_logical,
             weight=5.0,
             metric=9,
+            converged=not self.force_nonconverged,
         )
 
     def reset(self) -> None:
@@ -97,6 +99,19 @@ def test_forcing_decoder_rejects_inconsistent_forced_logical_class() -> None:
 
     with pytest.raises(RuntimeError, match="Forced run logical class"):
         decoder.decode(np.array([[0, 1]], dtype=np.uint8))
+
+
+def test_forcing_decoder_skips_logical_class_check_when_nonconverged() -> None:
+    runner = _FakeRunner(forced_logical=np.array([0], dtype=np.bool_))
+    runner.force_nonconverged = True
+    decoder = ForcingDegradationTestDecoder(runner=runner)
+
+    result = decoder.decode(np.array([[0, 1]], dtype=np.uint8))
+
+    assert result.predictions.tolist() == [[True]]
+    assert result.metrics["__is_logical_error"].tolist() == [True]
+    assert result.metrics["forced_iteration"].tolist() == [9]
+    assert result.metrics["forced_weight"].tolist() == [5.0]
 
 
 def test_append_observable_constraints_dense() -> None:
@@ -149,6 +164,8 @@ def test_relay_runner_records_iterations_and_forced_syndrome() -> None:
 
     assert baseline.metric == 4
     assert forced.metric == 30
+    assert baseline.converged is True
+    assert forced.converged is False
     assert adapter.seen_syndromes == [[1, 0], [1, 0, 1]]
 
 

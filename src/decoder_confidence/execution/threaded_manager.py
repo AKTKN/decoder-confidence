@@ -93,6 +93,15 @@ def _run_task(
             is_logical_error = mismatch.any(axis=1)
         else:
             is_logical_error = np.zeros(task.num_shots, dtype=bool)
+        logical_error_override = result.metrics.get("__is_logical_error")
+        if logical_error_override is not None:
+            override = np.asarray(logical_error_override, dtype=np.bool_)
+            if override.shape != (task.num_shots,):
+                raise ValueError(
+                    "__is_logical_error must be a 1D boolean array of length "
+                    f"{task.num_shots}, got shape {override.shape}"
+                )
+            is_logical_error = is_logical_error | override
 
         shot_ids = (
             task.shot_id_offset
