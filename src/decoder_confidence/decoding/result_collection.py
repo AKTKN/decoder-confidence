@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from pathlib import Path
 
 import polars as pl
@@ -19,23 +20,7 @@ DETAIL_STAT_COLUMN_RENAMES: dict[str, str] = {
     "stage2_2nd_best_weight": "forced_2nd_best_correction_weight",
 }
 
-
-@contextlib.contextmanager
-def _file_lock(lock_path: Path):
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - non-POSIX fallback
-        fcntl = None
-
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as handle:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+_LEGACY_DETAIL_BATCH_RE = re.compile(r"_batch=(\d+)\.parquet$")
 
 
 def _prefixed_cols(schema: pl.Schema, prefix: str) -> list[str]:
@@ -67,7 +52,7 @@ def _write_detailed_stats(
     )
 
 
-def _write_merged_decoder_stats(
+def _write_decoder_stats(
     scan: pl.LazyFrame,
     output_dir: Path,
     batch_num: int,
@@ -76,36 +61,66 @@ def _write_merged_decoder_stats(
     if not decoder_cols:
         return
 
-    target = output_dir / "decoder_stat.parquet"
-    lock_path = output_dir / ".decoder_stat.lock"
-    batch_tmp = output_dir / f".decoder_stat_batch={batch_num}.tmp.parquet"
-    merge_tmp = output_dir / ".decoder_stat.tmp.parquet"
-
     exprs: list[pl.Expr | str] = [
         "shot_id",
-        pl.lit(batch_num, dtype=pl.Int64).alias("batch"),
     ]
     exprs.extend(
         pl.col(col).alias(col.removeprefix(DECODER_STAT_PREFIX))
         for col in decoder_cols
     )
-    scan.select(exprs).sort(["batch", "shot_id"]).sink_parquet(
-        batch_tmp,
+    scan.select(exprs).sort("shot_id").sink_parquet(
+        output_dir / f"decoder_stat_batch={batch_num}.parquet",
         compression="zstd",
     )
 
-    with _file_lock(lock_path):
-        new_lf = pl.scan_parquet(batch_tmp)
-        if target.exists():
-            old_lf = pl.scan_parquet(target).filter(pl.col("batch") != batch_num)
-            merged = pl.concat([old_lf, new_lf], how="diagonal")
-        else:
-            merged = new_lf
-        merged.sort(["batch", "shot_id"]).sink_parquet(merge_tmp, compression="zstd")
-        merge_tmp.replace(target)
 
-    with contextlib.suppress(OSError):
-        batch_tmp.unlink()
+def _extract_legacy_batch(path: Path) -> int | None:
+    match = _LEGACY_DETAIL_BATCH_RE.search(path.name)
+    return int(match.group(1)) if match else None
+
+
+def _legacy_detail_files_by_batch(output_dir: Path) -> dict[int, dict[str, Path]]:
+    by_batch: dict[int, dict[str, Path]] = {}
+    for legacy_name in DETAIL_STAT_COLUMN_RENAMES:
+        candidates = sorted(output_dir.glob(f"metric={legacy_name}_batch=*.parquet"))
+        candidates.extend(sorted(output_dir.glob(f"{legacy_name}_batch=*.parquet")))
+        for path in candidates:
+            batch_idx = _extract_legacy_batch(path)
+            if batch_idx is None:
+                continue
+            by_batch.setdefault(batch_idx, {}).setdefault(legacy_name, path)
+    return by_batch
+
+
+def convert_legacy_detail_stats(output_dir: Path) -> None:
+    """Write new-format detail files for any legacy per-field detail outputs.
+
+    Legacy files are left untouched.  Existing new-format files are also left
+    untouched so a just-finished batch cannot be overwritten by stale data.
+    """
+    for batch_idx, legacy_files in sorted(_legacy_detail_files_by_batch(output_dir).items()):
+        target = output_dir / f"detailed_stats_batch={batch_idx}.parquet"
+        if target.exists() or not legacy_files:
+            continue
+
+        joined: pl.LazyFrame | None = None
+        used_names: set[str] = set()
+        for legacy_name, path in sorted(legacy_files.items()):
+            output_name = DETAIL_STAT_COLUMN_RENAMES.get(legacy_name, legacy_name)
+            if output_name in used_names:
+                continue
+            schema = pl.scan_parquet(path).collect_schema().names()
+            if legacy_name not in schema:
+                continue
+            lf = pl.scan_parquet(path).select(
+                "shot_id",
+                pl.col(legacy_name).alias(output_name),
+            )
+            joined = lf if joined is None else joined.join(lf, on="shot_id", how="inner")
+            used_names.add(output_name)
+
+        if joined is not None:
+            joined.sort("shot_id").sink_parquet(target, compression="zstd")
 
 
 def collect_results(
@@ -152,12 +167,13 @@ def collect_results(
         batch_num,
         _prefixed_cols(schema, DETAIL_STAT_PREFIX),
     )
-    _write_merged_decoder_stats(
+    _write_decoder_stats(
         scan,
         output_dir,
         batch_num,
         _prefixed_cols(schema, DECODER_STAT_PREFIX),
     )
+    convert_legacy_detail_stats(output_dir)
 
     if "obs_flip_idx" in schema:
         obs_df = scan.select(["shot_id", "obs_flip_idx"]).sort("shot_id").collect()

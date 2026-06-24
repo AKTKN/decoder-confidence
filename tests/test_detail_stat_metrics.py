@@ -228,10 +228,20 @@ def test_ilp_logicalgap_detail_stats_use_gap_detail_metadata() -> None:
     )
 
 
-def test_collect_results_writes_consolidated_detail_and_merged_decoder_stats(
+def test_collect_results_writes_batch_detail_decoder_stats_and_converts_legacy(
     tmp_path: Path,
 ) -> None:
     output_dir = tmp_path / "result"
+    output_dir.mkdir()
+    pl.DataFrame({"shot_id": [20], "stage1_weight": [7.0]}).write_parquet(
+        output_dir / "metric=stage1_weight_batch=3.parquet"
+    )
+    pl.DataFrame({"shot_id": [20], "stage1_obs_flip": [True]}).write_parquet(
+        output_dir / "metric=stage1_obs_flip_batch=3.parquet"
+    )
+    pl.DataFrame({"shot_id": [20], "stage2_weight": [8.0]}).write_parquet(
+        output_dir / "metric=stage2_weight_batch=3.parquet"
+    )
     chunk_dir = output_dir / "chunks" / "batch=1"
     chunk_dir.mkdir(parents=True)
     pl.DataFrame(
@@ -247,6 +257,8 @@ def test_collect_results_writes_consolidated_detail_and_merged_decoder_stats(
             f"{DETAIL_STAT_PREFIX}stage2_2ndbest_weight": [5.0, 6.0],
             f"{DECODER_STAT_PREFIX}baseline_iteration": [2.0, 3.0],
             f"{DECODER_STAT_PREFIX}forced_iteration": [4.0, 5.0],
+            f"{DECODER_STAT_PREFIX}baseline_cluster_llr": [0.1, 0.2],
+            f"{DECODER_STAT_PREFIX}forced_cluster_llr": [0.3, 0.4],
         }
     ).write_parquet(chunk_dir / "chunk_000.parquet")
 
@@ -265,12 +277,23 @@ def test_collect_results_writes_consolidated_detail_and_merged_decoder_stats(
         "forced_correction_weight",
     ]
     assert detail["baseline_correction_weight"].to_list() == [1.0, 2.0]
-    decoder_stat = pl.read_parquet(output_dir / "decoder_stat.parquet")
-    assert decoder_stat.select(["shot_id", "batch", "baseline_iteration"]).to_dict(as_series=False) == {
+    decoder_stat = pl.read_parquet(output_dir / "decoder_stat_batch=1.parquet")
+    assert not (output_dir / "decoder_stat.parquet").exists()
+    assert decoder_stat.select(
+        ["shot_id", "baseline_iteration", "baseline_cluster_llr"]
+    ).to_dict(as_series=False) == {
         "shot_id": [0, 1],
-        "batch": [1, 1],
         "baseline_iteration": [2.0, 3.0],
+        "baseline_cluster_llr": [0.1, 0.2],
     }
+    converted = pl.read_parquet(output_dir / "detailed_stats_batch=3.parquet")
+    assert converted.to_dict(as_series=False) == {
+        "shot_id": [20],
+        "baseline_correction_weight": [7.0],
+        "baseline_logical_error": [True],
+        "forced_correction_weight": [8.0],
+    }
+    assert (output_dir / "metric=stage1_weight_batch=3.parquet").exists()
 
     chunk_dir2 = output_dir / "chunks" / "batch=2"
     chunk_dir2.mkdir(parents=True)
@@ -283,8 +306,11 @@ def test_collect_results_writes_consolidated_detail_and_merged_decoder_stats(
         }
     ).write_parquet(chunk_dir2 / "chunk_000.parquet")
     collect_results(chunk_dir2, output_dir, 2, "forced_gap_ml")
-    merged = pl.read_parquet(output_dir / "decoder_stat.parquet").sort(["batch", "shot_id"])
-    assert merged["batch"].to_list() == [1, 1, 2]
+    batch2 = pl.read_parquet(output_dir / "decoder_stat_batch=2.parquet")
+    assert batch2.to_dict(as_series=False) == {
+        "shot_id": [10],
+        "baseline_iteration": [9.0],
+    }
 
 
 def test_random_split_constrained_system_preserves_physical_parity() -> None:
