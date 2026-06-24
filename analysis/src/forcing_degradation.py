@@ -256,11 +256,12 @@ def descriptive_statistics(
         )
         for col in value_cols:
             series = subset[col].cast(pl.Float64)
+            std = series.std()
             row: dict[str, Any] = {
                 "column": col,
                 "count": int(series.len()),
                 "mean": float(series.mean()) if series.len() else None,
-                "std": float(series.std()) if series.len() else None,
+                "std": float(std) if std is not None else None,
                 "min": float(series.min()) if series.len() else None,
                 "max": float(series.max()) if series.len() else None,
             }

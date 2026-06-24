@@ -63,6 +63,12 @@ def _matches_filter(raw_val: str, expected: Any) -> bool:
 def _matches_all_filters(params: dict[str, str], filters: dict[str, Any]) -> bool:
     for key, expected in filters.items():
         if key not in params:
+            # Some historical/default-false directory flags are omitted from
+            # path names.  Treat a missing boolean flag as False so filters like
+            # {"ibm_reproduce": False} match the default directory layout,
+            # while {"ibm_reproduce": True} still requires an explicit flag.
+            if isinstance(expected, bool) and expected is False:
+                continue
             return False
         if not _matches_filter(params[key], expected):
             return False

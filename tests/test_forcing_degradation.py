@@ -16,6 +16,7 @@ from analysis.src.forcing_degradation import (
     load_forcing_degradation_lazy,
     plot_metric_frequency,
 )
+from analysis.src.data_manager import _matches_all_filters
 from decoder_confidence.decoding.forcing_degradation_collect import main as forcing_main
 from decoder_confidence.decoding._forcing_degradation_test import (
     BpLsdForcingStageRunner,
@@ -321,6 +322,58 @@ def test_forcing_degradation_analysis_load_stats_and_plot(tmp_path: Path) -> Non
     assert ax.get_xlabel() == "baseline_iteration"
     assert len(ax.collections) == 2
     fig.clf()
+
+
+def test_missing_false_boolean_filter_matches_default_directory() -> None:
+    params = {
+        "code": "bivariate_bicycle_code_Z",
+        "d": "6",
+        "rounds": "6",
+        "noisemodel": "phenomenological",
+        "p": "0.02",
+        "xyz": "False",
+    }
+
+    assert _matches_all_filters(params, {"ibm_reproduce": False})
+    assert not _matches_all_filters(params, {"ibm_reproduce": True})
+
+
+def test_forcing_degradation_load_matches_omitted_false_filter(tmp_path: Path) -> None:
+    result_dir = (
+        tmp_path
+        / "code=bivariate_bicycle_code_Z,d=6,rounds=6,noisemodel=phenomenological,p=0.02,use_both=False,xyz=False"
+        / "decoding_result"
+        / "decoder=BP-LSD,metric=forcing_degradation_test,alpha=2.0"
+    )
+    result_dir.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "shot_id": [0],
+            "logicalerror": [False],
+            "baseline_weight": [1.0],
+            "forced_weight": [2.0],
+        }
+    ).write_parquet(result_dir / "metric=forcing_degradation_test_batch=1.parquet")
+
+    df = load_forcing_degradation_lazy(
+        tmp_path,
+        ForcingDegradationConfig(
+            filters={
+                "code": "bivariate_bicycle_code_Z",
+                "noisemodel": "phenomenological",
+                "rounds": 6,
+                "d": 6,
+                "p": 0.02,
+                "xyz": False,
+                "ibm_reproduce": False,
+            },
+            decoder_names=["BP-LSD"],
+        ),
+    ).collect()
+
+    assert df.height == 1
+    assert df["decoder"].to_list() == ["BP-LSD"]
+    assert df["alpha"].to_list() == [2.0]
 
 
 def _sample_forcing_data(tmp_path: Path, *, num_batch: int) -> Path:
