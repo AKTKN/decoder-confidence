@@ -13,6 +13,10 @@ import polars as pl
 from analysis.src.config import PlotConfig
 from analysis.src.data_manager import SimulationDataManager
 from analysis.src.postselect import PostSelectSpec, PostSelectionPlotter
+from analysis.src.stage_gap_difference import (
+    Stage1GapDifferenceConfig,
+    load_stage1_gap_difference_lazy,
+)
 
 
 def _write_batch(dm_dir: Path, metric_name: str, metric_values: list[float], errors: list[bool]) -> None:
@@ -61,6 +65,64 @@ def test_query_forced_gap_can_use_linearize_logical_error(tmp_path: Path) -> Non
 
     assert df["forced_gap_ml"].to_list() == [0.2, 0.8]
     assert df["is_logical_error"].to_list() == [True, False]
+
+
+def test_stage_gap_difference_loads_new_consolidated_detail_format(tmp_path: Path) -> None:
+    circuit_dir = (
+        tmp_path
+        / "code=surface_code_Z,d=5,rounds=5,noisemodel=si1000,p=0.001,xyz=False"
+    )
+    decoding_dir = circuit_dir / "decoding_result"
+    logical_dir = decoding_dir / "decoder=BP-LSD,metric=logical_gap,get_detail_stat=True"
+    forced_dir = decoding_dir / "decoder=BP-LSD,metric=forced_gap_ml,get_detail_stat=True"
+    logical_dir.mkdir(parents=True)
+    forced_dir.mkdir(parents=True)
+
+    pl.DataFrame({"shot_id": [0], "logical_gap": [0.5]}).write_parquet(
+        logical_dir / "metric=logical_gap_batch=1.parquet"
+    )
+    pl.DataFrame({"shot_id": [0], "forced_gap_ml": [0.75]}).write_parquet(
+        forced_dir / "metric=forced_gap_ml_batch=1.parquet"
+    )
+    pl.DataFrame({"shot_id": [0], "is_logical_error": [False]}).write_parquet(
+        logical_dir / "logicalerror_batch=1.parquet"
+    )
+    pl.DataFrame({"shot_id": [0], "is_logical_error": [True]}).write_parquet(
+        forced_dir / "logicalerror_batch=1.parquet"
+    )
+    detail = {
+        "shot_id": [0],
+        "baseline_logical_error": [False],
+        "baseline_correction_weight": [1.0],
+        "forced_logical_error": [True],
+        "forced_correction_weight": [2.0],
+    }
+    pl.DataFrame(detail).write_parquet(logical_dir / "detailed_stats_batch=1.parquet")
+    forced_detail = dict(detail)
+    forced_detail.update(
+        {
+            "forced_2nd_best_logical_error": [False],
+            "forced_2nd_best_correction_weight": [3.0],
+        }
+    )
+    pl.DataFrame(forced_detail).write_parquet(forced_dir / "detailed_stats_batch=1.parquet")
+
+    df = load_stage1_gap_difference_lazy(
+        tmp_path,
+        Stage1GapDifferenceConfig(stage1_weight_case="all"),
+    ).collect()
+
+    assert df.select(
+        [
+            "logical_stage1_weight",
+            "forced_stage2_2ndbest_weight",
+            "forced_stage2_2ndbest_obs_flip",
+        ]
+    ).to_dict(as_series=False) == {
+        "logical_stage1_weight": [1.0],
+        "forced_stage2_2ndbest_weight": [3.0],
+        "forced_stage2_2ndbest_obs_flip": [False],
+    }
 
 
 def test_postselect_spec_passes_use_linearize_to_plot_config() -> None:

@@ -179,10 +179,20 @@ def _normalize_predictions(
     return arr.astype(np.bool_, copy=False)
 
 
-def _normalize_metrics(metrics: dict[str, Any], num_shots: int) -> dict[str, np.ndarray]:
+DETAIL_STAT_PREFIX = "detail_stat_"
+DECODER_STAT_PREFIX = "decoder_stat_"
+
+
+def _normalize_array_map(
+    values: dict[str, Any],
+    num_shots: int,
+    *,
+    prefix: str,
+    skip_private: bool = False,
+) -> dict[str, np.ndarray]:
     normalized: dict[str, np.ndarray] = {}
-    for key, value in metrics.items():
-        if key.startswith("__"):
+    for key, value in values.items():
+        if skip_private and key.startswith("__"):
             continue
         arr = np.asarray(value)
         if arr.ndim == 0:
@@ -196,10 +206,19 @@ def _normalize_metrics(metrics: dict[str, Any], num_shots: int) -> dict[str, np.
             arr = arr.reshape(num_shots)
         else:
             raise ValueError(
-                f"metric {key} must be scalar or 1D array of length num_shots"
+                f"{prefix}{key} must be scalar or 1D array of length num_shots"
             )
-        normalized[f"metric_{key}"] = arr
+        normalized[f"{prefix}{key}"] = arr
     return normalized
+
+
+def _normalize_metrics(metrics: dict[str, Any], num_shots: int) -> dict[str, np.ndarray]:
+    return _normalize_array_map(
+        metrics,
+        num_shots,
+        prefix="metric_",
+        skip_private=True,
+    )
 
 
 def run_task(task: SimulationTask) -> WorkerResult:
@@ -270,6 +289,20 @@ def run_task(task: SimulationTask) -> WorkerResult:
             "is_logical_error": is_logical_error,
         }
         columns.update(_normalize_metrics(result.metrics, task.num_shots))
+        columns.update(
+            _normalize_array_map(
+                result.detail_stats,
+                task.num_shots,
+                prefix=DETAIL_STAT_PREFIX,
+            )
+        )
+        columns.update(
+            _normalize_array_map(
+                result.decoder_stats,
+                task.num_shots,
+                prefix=DECODER_STAT_PREFIX,
+            )
+        )
 
         if result.obs_flip_idx is not None:
             blobs = [encode_obs_flip_shot(idxs) for idxs in result.obs_flip_idx]

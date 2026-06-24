@@ -3,17 +3,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+import warnings
 
 import numpy as np
 import stim
 
 from decoder_confidence.config import DecodingResult
+from decoder_confidence.decoding._constraints import (
+    ConstrainedDecodeOptions,
+    build_constrained_system,
+)
 from decoder_confidence.decoding._decoder_adapter import (
     DecoderAdapter,
+    BpLsdDecoderAdapter,
+    RelayBpDecoderAdapter,
     build_decoder_adapter,
     _clip_priors,
     _weights_from_priors,
 )
+from decoder_confidence.decoding._lsd_cluster_metric import _compute_cluster_llr
 from decoder_confidence.execution.models import DecoderBase, DecoderFactory
 
 
@@ -22,11 +30,32 @@ class LinearizeLogicalGapOptions:
     """Options for the linearize_logicalgap metric."""
 
     get_detail_stat: bool = False
+    random_split: bool = False
+    n_splits: int = 3
+    split_seed: int = 0
+    split_balanced: bool = False
+    cluster_llr_alpha: float = 2.0
+
+    @property
+    def constrained_decode_options(self) -> ConstrainedDecodeOptions:
+        return ConstrainedDecodeOptions(
+            random_split=self.random_split,
+            n_splits=self.n_splits,
+            split_seed=self.split_seed,
+            split_balanced=self.split_balanced,
+        )
 
 
 def _parse_linearize_options(metric_options: Mapping[str, Any]) -> LinearizeLogicalGapOptions:
+    alpha_raw = metric_options.get("alpha", metric_options.get("cluster_llr_alpha", 2.0))
+    alpha = float(alpha_raw) if str(alpha_raw).lower() != "inf" else np.inf
     return LinearizeLogicalGapOptions(
-        get_detail_stat=bool(metric_options.get("get_detail_stat", False))
+        get_detail_stat=bool(metric_options.get("get_detail_stat", False)),
+        random_split=bool(metric_options.get("random_split", False)),
+        n_splits=int(metric_options.get("n_splits", 3)),
+        split_seed=int(metric_options.get("split_seed", 0)),
+        split_balanced=bool(metric_options.get("split_balanced", False)),
+        cluster_llr_alpha=alpha,
     )
 
 
@@ -105,6 +134,44 @@ class LinearizeLogicalGapDecoder(DecoderBase):
         self._observables: Any = self.adapter.observables_matrix
         self._num_errors: int = self.adapter.num_errors
         self._weights: np.ndarray = _weights_from_priors(self._base_priors)
+        self._partition_cache: dict[int, Any] = {}
+        self._decoder_stat_kind: str | None = None
+        if self.options.get_detail_stat:
+            if isinstance(self.adapter, BpLsdDecoderAdapter):
+                self.adapter.enable_lsd_statistics()
+                self._decoder_stat_kind = "cluster_llr"
+            elif isinstance(self.adapter, RelayBpDecoderAdapter):
+                self._decoder_stat_kind = "iteration"
+            else:
+                warnings.warn(
+                    "decoder_stat.parquet is only supported for BP-LSD and Relay-BP; "
+                    f"got {self.adapter.__class__.__name__}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+    def _decode_with_decoder_stat(self, syndrome: np.ndarray) -> tuple[np.ndarray, float | None]:
+        if self._decoder_stat_kind == "iteration":
+            assert isinstance(self.adapter, RelayBpDecoderAdapter)
+            result = self.adapter.decode_detailed_single(syndrome)
+            stat = float(result.iterations) if bool(result.success) else np.nan
+            return np.asarray(result.decoding, dtype=np.bool_), stat
+
+        correction = np.asarray(self.adapter.decode(syndrome), dtype=np.bool_)
+        if self._decoder_stat_kind == "cluster_llr":
+            assert isinstance(self.adapter, BpLsdDecoderAdapter)
+            stats = self.adapter.lsd_statistics
+            priors = np.asarray(self.adapter.priors, dtype=float)
+            w_e = _weights_from_priors(priors)
+            return (
+                correction,
+                _compute_cluster_llr(
+                    stats.get("individual_cluster_stats", {}),
+                    w_e,
+                    self.options.cluster_llr_alpha,
+                ),
+            )
+        return correction, None
 
     def decode(
         self,
@@ -134,13 +201,21 @@ class LinearizeLogicalGapDecoder(DecoderBase):
             stage2_weight = np.full((num_shots,), np.nan, dtype=float)
             stage2_obs_flip = np.zeros((num_shots,), dtype=np.bool_)
 
+            baseline_stat = np.full((num_shots,), np.nan, dtype=float)
+            forced_stat = np.full((num_shots,), np.nan, dtype=float)
+            forced_mean_stat = np.full((num_shots,), np.nan, dtype=float)
+            forced_std_stat = np.full((num_shots,), np.nan, dtype=float)
+            forced_max_stat = np.full((num_shots,), np.nan, dtype=float)
+
         for shot in range(num_shots):
             syndrome = syndromes[shot]
 
             # --- Stage 1: decode with the original check matrix ---
-            self.adapter.set_priors(self._base_priors.copy())
-            self.adapter.set_check_matrix(self._base_check_matrix)
-            c1 = np.asarray(self.adapter.decode(syndrome), dtype=np.bool_)
+            self.adapter.set_check_matrix_and_priors(
+                self._base_check_matrix,
+                self._base_priors.copy(),
+            )
+            c1, stat1 = self._decode_with_decoder_stat(syndrome)
 
             l1 = _logical_from_correction(self._observables, c1)
             w1 = float(self._weights @ c1.astype(int))
@@ -150,6 +225,8 @@ class LinearizeLogicalGapDecoder(DecoderBase):
             if self.options.get_detail_stat:
                 stage1_weight[shot] = w1
                 stage1_obs_flip[shot] = _is_obs_flip(l1, obs_shot)
+                if stat1 is not None:
+                    baseline_stat[shot] = stat1
 
             if num_obs == 0:
                 obs_flip_idx.append([])
@@ -158,30 +235,48 @@ class LinearizeLogicalGapDecoder(DecoderBase):
             # --- Stage 2: one decode per observable, forcing it to flip ---
             best_w2 = np.inf
             best_l2: np.ndarray | None = None
+            best_stat2: float | None = None
+            stage2_stats: list[float] = []
             best_flip: list[int] = []
             for i in range(num_obs):
                 obs_row_i = _get_obs_row(self._observables, i)
-                aug_check = _append_row(self._base_check_matrix, obs_row_i)
                 # Syndrome bit for the new check: (L[i] @ E) mod 2 must equal 1 XOR l1[i]
                 target_bit = 1 - int(l1[i])
-                aug_syndrome = np.append(syndrome, target_bit)
+                constrained = build_constrained_system(
+                    self._base_check_matrix,
+                    syndrome,
+                    self._base_priors,
+                    obs_row_i,
+                    target_bit,
+                    self.options.constrained_decode_options,
+                    self._partition_cache,
+                    i,
+                )
 
-                self.adapter.set_check_matrix(aug_check)
-                self.adapter.set_priors(self._base_priors.copy())
-                c2 = np.asarray(self.adapter.decode(aug_syndrome), dtype=np.bool_)
+                self.adapter.set_check_matrix_and_priors(
+                    constrained.check_matrix,
+                    constrained.priors.copy(),
+                )
+                c2_full, stat2 = self._decode_with_decoder_stat(constrained.syndrome)
+                c2 = c2_full[: constrained.physical_cols]
 
                 l2 = _logical_from_correction(self._observables, c2)
                 w2_i = float(self._weights @ c2.astype(int))
+                if stat2 is not None:
+                    stage2_stats.append(float(stat2))
                 if w2_i < best_w2:
                     best_w2 = w2_i
                     best_l2 = l2
+                    best_stat2 = stat2
                     # Indices where stage-2 logical class differs from stage-1
                     diff = np.asarray(l1, dtype=int) ^ np.asarray(l2, dtype=int)
                     best_flip = list(np.where(diff)[0])
 
             # Restore original state for the next shot
-            self.adapter.set_check_matrix(self._base_check_matrix)
-            self.adapter.set_priors(self._base_priors.copy())
+            self.adapter.set_check_matrix_and_priors(
+                self._base_check_matrix,
+                self._base_priors.copy(),
+            )
 
             gap[shot] = best_w2 - w1
             obs_flip_idx.append(best_flip)
@@ -189,21 +284,47 @@ class LinearizeLogicalGapDecoder(DecoderBase):
                 stage2_weight[shot] = best_w2
                 if best_l2 is not None:
                     stage2_obs_flip[shot] = _is_obs_flip(best_l2, obs_shot)
+                if best_stat2 is not None:
+                    forced_stat[shot] = best_stat2
+                if stage2_stats:
+                    stat_arr = np.asarray(stage2_stats, dtype=float)
+                    if np.isfinite(stat_arr).any():
+                        forced_mean_stat[shot] = float(np.nanmean(stat_arr))
+                        forced_std_stat[shot] = float(np.nanstd(stat_arr))
+                        forced_max_stat[shot] = float(np.nanmax(stat_arr))
 
         metrics: dict[str, Any] = {"linearize_logicalgap": gap}
+        detail_stats: dict[str, Any] = {}
+        decoder_stats: dict[str, Any] = {}
         if self.options.get_detail_stat:
-            metrics.update(
-                {
-                    "stage1_weight": stage1_weight,
-                    "stage1_obs_flip": stage1_obs_flip,
-                    "stage2_weight": stage2_weight,
-                    "stage2_obs_flip": stage2_obs_flip,
+            detail_stats = {
+                "stage1_weight": stage1_weight,
+                "stage1_obs_flip": stage1_obs_flip,
+                "stage2_weight": stage2_weight,
+                "stage2_obs_flip": stage2_obs_flip,
+            }
+            if self._decoder_stat_kind == "cluster_llr":
+                decoder_stats = {
+                    "baseline_cluster_llr": baseline_stat,
+                    "forced_cluster_llr": forced_stat,
+                    "forced_mean_cluster_llr": forced_mean_stat,
+                    "forced_std_cluster_llr": forced_std_stat,
+                    "forced_max_cluster_llr": forced_max_stat,
                 }
-            )
+            elif self._decoder_stat_kind == "iteration":
+                decoder_stats = {
+                    "baseline_iteration": baseline_stat,
+                    "forced_iteration": forced_stat,
+                    "forced_mean_iteration": forced_mean_stat,
+                    "forced_std_iteration": forced_std_stat,
+                    "forced_max_iteration": forced_max_stat,
+                }
 
         return DecodingResult(
             predictions=predictions,
             metrics=metrics,
+            detail_stats=detail_stats,
+            decoder_stats=decoder_stats,
             obs_flip_idx=obs_flip_idx,
         )
 

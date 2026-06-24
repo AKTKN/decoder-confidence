@@ -258,7 +258,13 @@ class SimulationDataManager:
             if not le_file.exists():
                 continue
 
-            lf = self._build_single_frame(metric_file, le_file, all_params, batch_idx)
+            lf = self._build_single_frame(
+                metric_file,
+                le_file,
+                all_params,
+                batch_idx,
+                metric_name,
+            )
             frames.append(lf)
 
         return frames
@@ -269,6 +275,7 @@ class SimulationDataManager:
         le_file: Path,
         params: dict[str, str],
         batch_idx: int,
+        metric_name: str,
     ) -> pl.LazyFrame:
         """Lazily scan one batch of metric + logical-error parquet files and join them.
 
@@ -276,8 +283,8 @@ class SimulationDataManager:
         downstream ``group_by`` / ``partition_by`` operations work without loading the
         full dataset.
         """
-        metric_lf = pl.scan_parquet(metric_file)
-        le_lf = pl.scan_parquet(le_file)
+        metric_lf = pl.scan_parquet(metric_file).select(["shot_id", metric_name])
+        le_lf = pl.scan_parquet(le_file).select(["shot_id", "is_logical_error"])
 
         # Join on shot_id — both files share this key
         combined = metric_lf.join(le_lf, on="shot_id", how="inner")

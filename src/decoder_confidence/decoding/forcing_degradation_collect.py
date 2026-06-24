@@ -6,7 +6,6 @@ from pathlib import Path
 import polars as pl
 
 from decoder_confidence.decoding.__main__ import (
-    _cleanup_intermediate,
     _find_circuit_dir,
     _format_metric_options,
     parse_args,
@@ -20,6 +19,7 @@ from decoder_confidence.decoding.incomplete import (
     write_incomplete_shots,
 )
 from decoder_confidence.decoding.metadata import build_decoding_metadata, write_metadata
+from decoder_confidence.decoding.result_collection import cleanup_intermediate
 from decoder_confidence.execution.manager import ExecutionConfig, run_manager
 from decoder_confidence.execution.models import IncompleteTasksError
 
@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         else []
     )
     if args.cleanup_intermediate:
-        _cleanup_intermediate(chunk_dir)
+        cleanup_intermediate(chunk_dir)
 
     incomplete_path = output_dir / INCOMPLETE_SHOTS_FILENAME
     if outcome.incomplete:

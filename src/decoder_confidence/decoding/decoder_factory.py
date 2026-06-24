@@ -9,8 +9,6 @@ import yaml
 from decoder_confidence.decoding._argument_reweighting import (
     make_argument_reweighting_factory,
 )
-from decoder_confidence.decoding._ilp_logicalgap import make_ilp_decoder_factory
-from decoder_confidence.decoding._ilp_cplex_logicalgap import make_cplex_decoder_factory
 from decoder_confidence.decoding._forced_gap import make_forced_gap_ml_factory
 from decoder_confidence.decoding._forcing_degradation_test import (
     FORCING_DEGRADATION_METRIC,
@@ -192,8 +190,16 @@ def load_decoder_factory(
                 "Set solver: gurobi or solver: cplex"
             )
         if solver == "gurobi":
+            from decoder_confidence.decoding._ilp_logicalgap import (
+                make_ilp_decoder_factory,
+            )
+
             factory = make_ilp_decoder_factory(dem_path, decoder_options, metric_options)
         elif solver == "cplex":
+            from decoder_confidence.decoding._ilp_cplex_logicalgap import (
+                make_cplex_decoder_factory,
+            )
+
             factory = make_cplex_decoder_factory(dem_path, decoder_options, metric_options)
         else:
             raise ValueError(

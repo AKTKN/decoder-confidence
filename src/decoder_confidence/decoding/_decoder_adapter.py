@@ -195,6 +195,10 @@ class DecoderAdapter(ABC):
     def set_check_matrix(self, check_matrix: Any) -> None:
         ...
 
+    def set_check_matrix_and_priors(self, check_matrix: Any, priors: np.ndarray) -> None:
+        self.set_priors(priors)
+        self.set_check_matrix(check_matrix)
+
     @abstractmethod
     def set_observables(self, observables_matrix: Any) -> None:
         ...
@@ -261,6 +265,11 @@ class IlpDecoderAdapter(DecoderAdapter):
         self._check_matrix = check_matrix
         self._rebuild()
 
+    def set_check_matrix_and_priors(self, check_matrix: Any, priors: np.ndarray) -> None:
+        self._priors = _clip_priors(priors)
+        self._check_matrix = check_matrix
+        self._rebuild()
+
     def set_observables(self, observables_matrix: Any) -> None:
         self._observables_matrix = observables_matrix
         self._rebuild()
@@ -289,6 +298,7 @@ class BpLsdDecoderAdapter(DecoderAdapter):
     _observables_matrix: Any
     _priors: np.ndarray
     _decoder_options: Mapping[str, Any]
+    _collect_lsd_stats: bool = False
 
     @property
     def priors(self) -> np.ndarray:
@@ -311,6 +321,17 @@ class BpLsdDecoderAdapter(DecoderAdapter):
         corr = self._decoder.decode(syndrome)
         return np.asarray(corr, dtype=np.bool_)
 
+    @property
+    def lsd_statistics(self) -> dict:
+        return getattr(self._decoder, "statistics", {}) or {}
+
+    def enable_lsd_statistics(self) -> None:
+        options = dict(self._decoder_options)
+        options["always_run_lsd"] = True
+        self._decoder_options = options
+        self._collect_lsd_stats = True
+        self._rebuild()
+
     def set_priors(self, priors: np.ndarray) -> None:
         self._priors = _clip_priors(priors)
         if hasattr(self._decoder, "update_channel_probs"):
@@ -322,6 +343,11 @@ class BpLsdDecoderAdapter(DecoderAdapter):
         self._check_matrix = check_matrix
         self._rebuild()
 
+    def set_check_matrix_and_priors(self, check_matrix: Any, priors: np.ndarray) -> None:
+        self._priors = _clip_priors(priors)
+        self._check_matrix = check_matrix
+        self._rebuild()
+
     def set_observables(self, observables_matrix: Any) -> None:
         self._observables_matrix = observables_matrix
 
@@ -329,6 +355,8 @@ class BpLsdDecoderAdapter(DecoderAdapter):
         self._decoder = _build_bplsd_decoder(
             self._check_matrix, self._priors, self._decoder_options
         )
+        if self._collect_lsd_stats and hasattr(self._decoder, "set_do_stats"):
+            self._decoder.set_do_stats(True)
 
 
 @dataclass
@@ -367,6 +395,13 @@ class MwpmDecoderAdapter(DecoderAdapter):
         )
 
     def set_check_matrix(self, check_matrix: Any) -> None:
+        self._check_matrix = check_matrix
+        self._matching = _build_matching(
+            self._check_matrix, self._priors, self._decoder_options
+        )
+
+    def set_check_matrix_and_priors(self, check_matrix: Any, priors: np.ndarray) -> None:
+        self._priors = _clip_priors(priors)
         self._check_matrix = check_matrix
         self._matching = _build_matching(
             self._check_matrix, self._priors, self._decoder_options
@@ -563,6 +598,11 @@ class RelayBpDecoderAdapter(DecoderAdapter):
         self._rebuild()
 
     def set_check_matrix(self, check_matrix: Any) -> None:
+        self._check_matrix = check_matrix
+        self._rebuild()
+
+    def set_check_matrix_and_priors(self, check_matrix: Any, priors: np.ndarray) -> None:
+        self._priors = _clip_priors(priors)
         self._check_matrix = check_matrix
         self._rebuild()
 

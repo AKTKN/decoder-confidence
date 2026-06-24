@@ -26,6 +26,8 @@ class DecodingResult:
 	"""Standard output for all decoders."""
 	predictions: np.ndarray
 	metrics: Dict[str, Any] = field(default_factory=dict)
+	detail_stats: Dict[str, Any] = field(default_factory=dict)
+	decoder_stats: Dict[str, Any] = field(default_factory=dict)
 	obs_flip_idx: list[list[int]] | None = None
 
 
