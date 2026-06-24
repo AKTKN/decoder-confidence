@@ -108,46 +108,56 @@ def _join_optional_metric(
     return base.join(detail_lf, on="shot_id", how="inner")
 
 
-def _join_logical_error(
+def _join_new_detail_stats(
     base: pl.LazyFrame,
-    dm_dir: Path,
-    batch_idx: int,
-    *,
-    prefix: str,
-) -> pl.LazyFrame:
-    le_file = dm_dir / f"logicalerror_batch={batch_idx}.parquet"
-    if not le_file.exists():
-        raise FileNotFoundError(f"Required logical-error file not found: {le_file}")
-
-    le_lf = pl.scan_parquet(le_file)
-    if "is_logical_error" not in le_lf.collect_schema().names():
-        raise ValueError(f"Expected column 'is_logical_error' in {le_file}")
-    le_lf = le_lf.select(
-        "shot_id",
-        pl.col("is_logical_error").alias(f"{prefix}_is_logical_error"),
-    )
-    return base.join(le_lf, on="shot_id", how="inner")
-
-
-def _load_metric_detail_lazy(
     dm_dir: Path,
     metric_name: str,
     batch_idx: int,
-    all_params: dict[str, str],
     *,
     prefix: str,
 ) -> pl.LazyFrame:
-    metric_file = dm_dir / f"metric={metric_name}_batch={batch_idx}.parquet"
-    if not metric_file.exists():
-        raise FileNotFoundError(f"Required metric file not found: {metric_file}")
+    detail_file = dm_dir / f"detailed_stats_batch={batch_idx}.parquet"
+    if not detail_file.exists():
+        return _join_legacy_detail_stats(base, dm_dir, metric_name, batch_idx, prefix=prefix)
 
-    lf = pl.scan_parquet(metric_file).select(
-        "shot_id",
-        pl.col(metric_name).alias(metric_name),
-    )
-    lf = _join_logical_error(lf, dm_dir, batch_idx, prefix=prefix)
+    schema = pl.scan_parquet(detail_file).collect_schema().names()
+    aliases = {
+        "baseline_correction_weight": f"{prefix}_stage1_weight",
+        "baseline_logical_error": f"{prefix}_stage1_obs_flip",
+        "forced_correction_weight": f"{prefix}_stage2_weight",
+        "forced_logical_error": f"{prefix}_stage2_obs_flip",
+    }
+    if metric_name == "forced_gap_ml":
+        aliases.update(
+            {
+                "forced_2nd_best_correction_weight": f"{prefix}_stage2_2ndbest_weight",
+                "forced_2nd_best_logical_error": f"{prefix}_stage2_2ndbest_obs_flip",
+            }
+        )
+
+    if "baseline_correction_weight" not in schema:
+        raise ValueError(
+            f"Expected column 'baseline_correction_weight' in {detail_file}"
+        )
+
+    exprs: list[pl.Expr | str] = ["shot_id"]
+    for source, alias in aliases.items():
+        if source in schema:
+            exprs.append(pl.col(source).alias(alias))
+
+    return base.join(pl.scan_parquet(detail_file).select(exprs), on="shot_id", how="inner")
+
+
+def _join_legacy_detail_stats(
+    base: pl.LazyFrame,
+    dm_dir: Path,
+    metric_name: str,
+    batch_idx: int,
+    *,
+    prefix: str,
+) -> pl.LazyFrame:
     lf = _join_optional_metric(
-        lf,
+        base,
         dm_dir,
         "stage1_weight",
         batch_idx,
@@ -196,6 +206,54 @@ def _load_metric_detail_lazy(
             f"{prefix}_stage2_2ndbest_obs_flip",
             required=False,
         )
+    return lf
+
+
+def _join_logical_error(
+    base: pl.LazyFrame,
+    dm_dir: Path,
+    batch_idx: int,
+    *,
+    prefix: str,
+) -> pl.LazyFrame:
+    le_file = dm_dir / f"logicalerror_batch={batch_idx}.parquet"
+    if not le_file.exists():
+        raise FileNotFoundError(f"Required logical-error file not found: {le_file}")
+
+    le_lf = pl.scan_parquet(le_file)
+    if "is_logical_error" not in le_lf.collect_schema().names():
+        raise ValueError(f"Expected column 'is_logical_error' in {le_file}")
+    le_lf = le_lf.select(
+        "shot_id",
+        pl.col("is_logical_error").alias(f"{prefix}_is_logical_error"),
+    )
+    return base.join(le_lf, on="shot_id", how="inner")
+
+
+def _load_metric_detail_lazy(
+    dm_dir: Path,
+    metric_name: str,
+    batch_idx: int,
+    all_params: dict[str, str],
+    *,
+    prefix: str,
+) -> pl.LazyFrame:
+    metric_file = dm_dir / f"metric={metric_name}_batch={batch_idx}.parquet"
+    if not metric_file.exists():
+        raise FileNotFoundError(f"Required metric file not found: {metric_file}")
+
+    lf = pl.scan_parquet(metric_file).select(
+        "shot_id",
+        pl.col(metric_name).alias(metric_name),
+    )
+    lf = _join_logical_error(lf, dm_dir, batch_idx, prefix=prefix)
+    lf = _join_new_detail_stats(
+        lf,
+        dm_dir,
+        metric_name,
+        batch_idx,
+        prefix=prefix,
+    )
 
     decoder = _strip_quotes(all_params.get("decoder", ""))
     literal_exprs = [

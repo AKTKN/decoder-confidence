@@ -32,6 +32,10 @@ from decoder_confidence.decoding.incomplete import (
     write_incomplete_shots,
 )
 from decoder_confidence.decoding.metadata import build_decoding_metadata, write_metadata
+from decoder_confidence.decoding.result_collection import (
+    cleanup_intermediate,
+    collect_results,
+)
 from decoder_confidence.execution._execution_utils import (
     bytes_per_shot_count,
     get_dem_counts,
@@ -57,7 +61,6 @@ from decoder_confidence.execution.models import (
 from decoder_confidence.execution.pool_runner import run_pool_tasks
 from decoder_confidence.execution.threaded_manager import _run_task as _threaded_run_task
 from decoder_confidence.execution.worker import init_worker, run_task
-from decoder_confidence.varint import write_obs_flip_idx_file
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -184,71 +187,6 @@ def _make_resume_tasks(
             batch_id += 1
             pos += num
     return tasks
-
-
-# ── Collect / cleanup (mirrors __main__ logic) ────────────────────────────────
-
-def _collect_results(
-    chunk_dir: Path,
-    output_dir: Path,
-    batch_num: int,
-    metric: str,
-) -> list[str]:
-    chunk_paths = sorted(chunk_dir.glob("chunk_*.parquet"))
-    part_paths = sorted((chunk_dir / "parts").glob("part_*.parquet"))
-    input_paths = chunk_paths + part_paths
-    if not input_paths:
-        raise FileNotFoundError(f"No chunk/part parquets found in {chunk_dir}")
-
-    scan = pl.scan_parquet([str(p) for p in input_paths])
-
-    scan.select(["shot_id", "is_logical_error"]).sink_parquet(
-        output_dir / f"logicalerror_batch={batch_num}.parquet", compression="zstd"
-    )
-
-    schema = scan.collect_schema()
-    metric_cols = [n for n in schema if n.startswith("metric_")]
-    if not metric_cols:
-        raise ValueError("No metric columns found in chunk outputs")
-
-    metric_names = sorted({n[len("metric_"):] for n in metric_cols})
-    if metric not in metric_names:
-        raise ValueError(
-            f"Configured metric '{metric}' not in outputs (found: {', '.join(metric_names)})"
-        )
-
-    for mn in metric_names:
-        scan.select(["shot_id", pl.col(f"metric_{mn}").alias(mn)]).sink_parquet(
-            output_dir / f"metric={mn}_batch={batch_num}.parquet", compression="zstd"
-        )
-
-    if "obs_flip_idx" in schema:
-        obs_df = scan.select(["shot_id", "obs_flip_idx"]).sort("shot_id").collect()
-        write_obs_flip_idx_file(
-            output_dir / f"obs_flip_idx_batch={batch_num}.bin",
-            obs_df["obs_flip_idx"].to_list(),
-        )
-
-    return metric_names
-
-
-def _cleanup_intermediate(chunk_dir: Path) -> None:
-    for p in chunk_dir.glob("chunk_*.parquet"):
-        try:
-            p.unlink()
-        except OSError:
-            pass
-    part_dir = chunk_dir / "parts"
-    if part_dir.exists():
-        for p in part_dir.glob("part_*.parquet"):
-            try:
-                p.unlink()
-            except OSError:
-                pass
-        try:
-            part_dir.rmdir()
-        except OSError:
-            pass
 
 
 # ── Task execution ─────────────────────────────────────────────────────────────
@@ -739,12 +677,12 @@ def main(argv: list[str] | None = None) -> int:
     has_outputs = bool(new_outcome.results) or covered_shots > 0
     if has_outputs:
         print("[resume] Collecting results...")
-        metric_names = _collect_results(chunk_dir, output_dir, batch_num, decoder_info.metric_name)
+        metric_names = collect_results(chunk_dir, output_dir, batch_num, decoder_info.metric_name)
     else:
         metric_names = []
 
     if args.cleanup_intermediate:
-        _cleanup_intermediate(chunk_dir)
+        cleanup_intermediate(chunk_dir)
 
     incomplete_path = output_dir / INCOMPLETE_SHOTS_FILENAME
     if new_outcome.incomplete:

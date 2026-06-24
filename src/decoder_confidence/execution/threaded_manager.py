@@ -39,6 +39,9 @@ from decoder_confidence.execution.models import (
 )
 from decoder_confidence.varint import encode_obs_flip_shot
 from decoder_confidence.execution.worker import (
+    DECODER_STAT_PREFIX,
+    DETAIL_STAT_PREFIX,
+    _normalize_array_map,
     _normalize_metrics,
     _normalize_predictions,
     read_b8_slice,
@@ -113,6 +116,20 @@ def _run_task(
             "is_logical_error": is_logical_error,
         }
         columns.update(_normalize_metrics(result.metrics, task.num_shots))
+        columns.update(
+            _normalize_array_map(
+                result.detail_stats,
+                task.num_shots,
+                prefix=DETAIL_STAT_PREFIX,
+            )
+        )
+        columns.update(
+            _normalize_array_map(
+                result.decoder_stats,
+                task.num_shots,
+                prefix=DECODER_STAT_PREFIX,
+            )
+        )
 
         if result.obs_flip_idx is not None:
             blobs = [encode_obs_flip_shot(idxs) for idxs in result.obs_flip_idx]
