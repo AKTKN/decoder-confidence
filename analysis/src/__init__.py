@@ -81,6 +81,17 @@ from analysis.src.forcing_degradation import (
     plot_value_frequency,
     plot_metric_frequency,
 )
+from analysis.src.split_analysis import (
+    DecoderStatDataLoader,
+    DecoderStatExperimentSpec,
+    decoder_stat_columns,
+    finite_column_values,
+    load_decoder_stats,
+    make_split_postselect_specs,
+    plot_decoder_stat_frequency,
+    summarize_decoder_stats,
+    value_frequency_table,
+)
 from analysis.src.figure_style import (
     MultiStyleFigureExporter,
     apply_paper_style,
@@ -179,6 +190,15 @@ __all__ = [
     "load_forcing_degradation_lazy",
     "plot_value_frequency",
     "plot_metric_frequency",
+    "DecoderStatDataLoader",
+    "DecoderStatExperimentSpec",
+    "decoder_stat_columns",
+    "finite_column_values",
+    "load_decoder_stats",
+    "make_split_postselect_specs",
+    "plot_decoder_stat_frequency",
+    "summarize_decoder_stats",
+    "value_frequency_table",
     "MultiStyleFigureExporter",
     "apply_paper_style",
     "set_tab10_colors",

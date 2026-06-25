@@ -22,10 +22,12 @@ from decoder_confidence.decoding._decoder_adapter import DecoderAdapter, _clip_p
 from decoder_confidence.decoding._forced_gap import (
     ForcedGapMLDecoder,
     ForcedGapMLOptions,
+    _parse_forced_gap_ml_options,
 )
 from decoder_confidence.decoding._linearize_logicalgap import (
     LinearizeLogicalGapDecoder,
     LinearizeLogicalGapOptions,
+    _parse_linearize_options,
 )
 from decoder_confidence.decoding.result_collection import collect_results
 from decoder_confidence.execution.worker import DECODER_STAT_PREFIX, DETAIL_STAT_PREFIX
@@ -361,3 +363,17 @@ def test_random_split_and_detail_stats_execute_together() -> None:
     assert result.detail_stats["stage1_weight"].shape == (1,)
     assert result.detail_stats["stage2_weight"].shape == (1,)
     assert result.decoder_stats == {}
+
+
+def test_unknown_split_metric_options_raise() -> None:
+    with pytest.raises(ValueError, match="randon_split"):
+        _parse_linearize_options({"randon_split": True, "n_splits": 6})
+
+    with pytest.raises(ValueError, match="randon_split"):
+        _parse_forced_gap_ml_options({"randon_split": True, "n_splits": 6})
+
+    with pytest.raises(ValueError, match="Unsupported linearize_logicalgap"):
+        _parse_linearize_options({"randm_split": True})
+
+    with pytest.raises(ValueError, match="Unsupported forced_gap_ml"):
+        _parse_forced_gap_ml_options({"randm_split": True})

@@ -75,6 +75,11 @@ def _matches_all_filters(params: dict[str, str], filters: dict[str, Any]) -> boo
     return True
 
 
+def _missing_all_keys(params: dict[str, str], keys: list[str]) -> bool:
+    """Return True when none of *keys* is present in a parsed directory name."""
+    return all(key not in params for key in keys)
+
+
 def _infer_literal(raw: str) -> pl.Expr:
     """Build a :func:`polars.lit` expression with an inferred type from *raw*.
 
@@ -226,6 +231,16 @@ class SimulationDataManager:
             # Must match one of the requested decoders (if specified)
             decoder = _strip_quotes(params.get("decoder", ""))
             if config.decoder_names is not None and decoder not in config.decoder_names:
+                continue
+
+            decoder_filters = dict(config.extra_options.get("decoder_filters", {}))
+            if decoder_filters and not _matches_all_filters(params, decoder_filters):
+                continue
+
+            decoder_exclude_keys = list(
+                config.extra_options.get("decoder_exclude_keys", [])
+            )
+            if decoder_exclude_keys and not _missing_all_keys(params, decoder_exclude_keys):
                 continue
 
             yield entry, params

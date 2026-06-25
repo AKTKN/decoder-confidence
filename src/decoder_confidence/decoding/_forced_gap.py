@@ -72,17 +72,36 @@ class ForcedGapMLOptions:
 
 
 def _parse_forced_gap_ml_options(metric_options: Mapping[str, Any]) -> ForcedGapMLOptions:
-    get_all_failure_rate = bool(metric_options.get("get_all_failure_rate", False))
-    get_detail_stat = bool(metric_options.get("get_detail_stat", False))
-    alpha_raw = metric_options.get("alpha", metric_options.get("cluster_llr_alpha", 2.0))
+    options = dict(metric_options)
+    allowed = {
+        "alpha",
+        "cluster_llr_alpha",
+        "get_all_failure_rate",
+        "get_detail_stat",
+        "random_split",
+        "n_splits",
+        "split_seed",
+        "split_balanced",
+    }
+    unknown = sorted(set(options) - allowed)
+    if unknown:
+        raise ValueError(
+            "Unsupported forced_gap_ml metric option(s): "
+            + ", ".join(unknown)
+            + f". Supported options: {', '.join(sorted(allowed))}"
+        )
+
+    get_all_failure_rate = bool(options.get("get_all_failure_rate", False))
+    get_detail_stat = bool(options.get("get_detail_stat", False))
+    alpha_raw = options.get("alpha", options.get("cluster_llr_alpha", 2.0))
     alpha = float(alpha_raw) if str(alpha_raw).lower() != "inf" else np.inf
     return ForcedGapMLOptions(
         get_all_failure_rate=get_all_failure_rate,
         get_detail_stat=get_detail_stat,
-        random_split=bool(metric_options.get("random_split", False)),
-        n_splits=int(metric_options.get("n_splits", 3)),
-        split_seed=int(metric_options.get("split_seed", 0)),
-        split_balanced=bool(metric_options.get("split_balanced", False)),
+        random_split=bool(options.get("random_split", False)),
+        n_splits=int(options.get("n_splits", 3)),
+        split_seed=int(options.get("split_seed", 0)),
+        split_balanced=bool(options.get("split_balanced", False)),
         cluster_llr_alpha=alpha,
     )
 

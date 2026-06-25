@@ -6,7 +6,18 @@ from pathlib import Path
 import numpy as np
 import stim
 
-from decoder_confidence.config import UINT64_MAX, validate_seed
+from decoder_confidence.config import validate_seed
+
+
+def _batch_offsets(batch_sizes: list[int]) -> list[tuple[int, int]]:
+	"""Return half-open shot ranges for each batch in the one-shot sample."""
+	offsets: list[tuple[int, int]] = []
+	start = 0
+	for shots in batch_sizes:
+		end = start + int(shots)
+		offsets.append((start, end))
+		start = end
+	return offsets
 
 
 def sample_batches(
@@ -18,31 +29,34 @@ def sample_batches(
 	append_observables: bool = True,
 	sample_format: str = "b8",
 ) -> list[Path]:
+	if sample_format != "b8":
+		raise ValueError(f"sample_batches only supports 'b8', got {sample_format!r}")
+
 	sampled_data_dir.mkdir(parents=True, exist_ok=True)
 	outputs: list[Path] = []
+	total_shots = int(sum(batch_sizes))
+	if total_shots <= 0:
+		return outputs
 
-	for batch_index, shots in enumerate(batch_sizes, start=1):
-		if shots <= 0:
+	validate_seed(det_sample_seed)
+
+	# 2026-06-25: The previous implementation compiled one sampler per batch
+	# with seed = det_sample_seed + batch_index - 1.  That made the sampled
+	# shot set depend on num_batch even when num_shots and det_sample_seed were
+	# unchanged.  The current implementation samples the full experiment once
+	# with det_sample_seed, then writes deterministic slices to batch files.
+	sampler = circuit.compile_detector_sampler(seed=det_sample_seed)
+	data = sampler.sample(total_shots, append_observables=append_observables)
+
+	for batch_index, (start, end) in enumerate(_batch_offsets(batch_sizes), start=1):
+		if end <= start:
 			continue
 		out_path = sampled_data_dir / f"det_batch={batch_index}.{sample_format}"
 		if out_path.exists():
 			logging.info("Skipping existing batch file: %s", out_path)
 			continue
 
-		seed = det_sample_seed + (batch_index - 1)
-		if seed > UINT64_MAX:
-			raise ValueError(
-				f"det_sample_seed + batch_index must be <= {UINT64_MAX} but got {seed}"
-			)
-		validate_seed(seed)
-
-		sampler = circuit.compile_detector_sampler(seed=seed)
-		sampler.sample_write(
-			shots=shots,
-			filepath=out_path,
-			format=sample_format,
-			append_observables=append_observables,
-		)
+		_write_b8(out_path, data[start:end])
 		outputs.append(out_path)
 
 	return outputs
@@ -90,7 +104,7 @@ def sample_batches_from_dem(
 		dem: Filtered DetectorErrorModel.
 		sampled_data_dir: Directory in which to write per-batch b8 files.
 		batch_sizes: Number of shots per batch.
-		det_sample_seed: Base random seed (incremented per batch).
+		det_sample_seed: Base random seed for the full one-shot sample.
 		sample_format: Only "b8" is supported.
 
 	Returns:
@@ -101,29 +115,31 @@ def sample_batches_from_dem(
 
 	sampled_data_dir.mkdir(parents=True, exist_ok=True)
 	outputs: list[Path] = []
+	total_shots = int(sum(batch_sizes))
+	if total_shots <= 0:
+		return outputs
 
-	for batch_index, shots in enumerate(batch_sizes, start=1):
-		if shots <= 0:
+	validate_seed(det_sample_seed)
+
+	# 2026-06-25: The old batch-local sampling scheme used seeds
+	# det_sample_seed, det_sample_seed + 1, ... for separate batch samplers.
+	# With the same total shots, changing num_batch therefore changed the
+	# sampled population.  We now sample total_shots once and split the resulting
+	# array, matching "sample once, then partition" semantics.
+	sampler = dem.compile_sampler(seed=det_sample_seed)
+	# Returns (dets, obs, errors); errors is None by default.
+	dets, obs, _ = sampler.sample(total_shots)
+
+	# Concatenate detector bits and observable bits, then write as b8.
+	data = np.concatenate([dets, obs], axis=1)
+	for batch_index, (start, end) in enumerate(_batch_offsets(batch_sizes), start=1):
+		if end <= start:
 			continue
 		out_path = sampled_data_dir / f"det_batch={batch_index}.{sample_format}"
 		if out_path.exists():
 			logging.info("Skipping existing batch file: %s", out_path)
 			continue
-
-		seed = det_sample_seed + (batch_index - 1)
-		if seed > UINT64_MAX:
-			raise ValueError(
-				f"det_sample_seed + batch_index must be <= {UINT64_MAX} but got {seed}"
-			)
-		validate_seed(seed)
-
-		sampler = dem.compile_sampler(seed=seed)
-		# Returns (dets, obs, errors); errors is None by default.
-		dets, obs, _ = sampler.sample(shots)
-
-		# Concatenate detector bits and observable bits, then write as b8.
-		data = np.concatenate([dets, obs], axis=1)
-		_write_b8(out_path, data)
+		_write_b8(out_path, data[start:end])
 		outputs.append(out_path)
 
 	return outputs

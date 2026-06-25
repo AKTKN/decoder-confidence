@@ -94,6 +94,53 @@ class PostSelectSpec:
     grid_scale: str = "linear"
     use_linearize: bool = False
     mark_zero_gap: bool = False
+    get_detail_stat: Optional[bool] = None
+    random_split: Optional[bool] = None
+    n_splits: Optional[int] = None
+    split_seed: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        split_metric = self.metric_name in {"linearize_logicalgap", "forced_gap_ml"}
+        split_values = (self.random_split, self.n_splits)
+        if any(value is not None for value in split_values):
+            if not split_metric:
+                raise ValueError(
+                    "random_split/n_splits options are only supported for "
+                    "linearize_logicalgap and forced_gap_ml"
+                )
+            if any(value is None for value in split_values):
+                raise ValueError(
+                    "random_split and n_splits must be specified together"
+                )
+
+    def decoder_query_options(self) -> dict[str, Any]:
+        """Return decoder-directory filters for this split configuration.
+
+        ``random_split=None`` means the ordinary, non-split metric directory.
+        """
+        if self.metric_name not in {"linearize_logicalgap", "forced_gap_ml"}:
+            return {}
+
+        detail_filter: dict[str, Any] = {}
+        if self.get_detail_stat is not None:
+            detail_filter["get_detail_stat"] = bool(self.get_detail_stat)
+
+        if self.random_split is None:
+            if detail_filter:
+                return {
+                    "decoder_filters": detail_filter,
+                    "decoder_exclude_keys": ["random_split", "randon_split", "n_splits"],
+                }
+            return {"decoder_exclude_keys": ["random_split", "randon_split", "n_splits", "get_detail_stat"]}
+
+        filters: dict[str, Any] = {
+            **detail_filter,
+            "n_splits": int(self.n_splits),
+        }
+        if self.split_seed is not None:
+            filters["split_seed"] = int(self.split_seed)
+        filters["random_split"] = bool(self.random_split)
+        return {"decoder_filters": filters}
 
 
 @dataclass
@@ -420,7 +467,10 @@ class PostSelectionPlotter:
             filters=spec.filters,
             group_by=spec.group_by,
             batch_indices=spec.batch_indices,
-            extra_options={"use_linearize": spec.use_linearize},
+            extra_options={
+                "use_linearize": spec.use_linearize,
+                **spec.decoder_query_options(),
+            },
         )
         lf = self.manager.query(plot_config)
 
