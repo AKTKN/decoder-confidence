@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 from pathlib import Path
 from typing import Sequence
 
@@ -29,9 +31,16 @@ def write_incomplete_shots(path: Path, incomplete: Sequence[IncompleteRange]) ->
         "total_incomplete_shots": sum(r["num_shots"] for r in ranges),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=True)
-        handle.write("\n")
+    tmp = path.parent / f".tmp_{os.getpid()}_{path.name}"
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def read_incomplete_shots(path: Path) -> list[IncompleteRange]:

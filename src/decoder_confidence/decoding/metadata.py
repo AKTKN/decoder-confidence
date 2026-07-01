@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import resource
 import sys
@@ -192,6 +194,13 @@ def build_decoding_metadata(
 
 def write_metadata(metadata_path: Path, metadata: Mapping[str, Any]) -> None:
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    with metadata_path.open("w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, indent=2, sort_keys=True, ensure_ascii=True)
-        handle.write("\n")
+    tmp = metadata_path.parent / f".tmp_{os.getpid()}_{metadata_path.name}"
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, indent=2, sort_keys=True, ensure_ascii=True)
+            handle.write("\n")
+        os.replace(tmp, metadata_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise

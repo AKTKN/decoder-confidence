@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 from pathlib import Path
 
@@ -27,8 +28,30 @@ def _prefixed_cols(schema: pl.Schema, prefix: str) -> list[str]:
     return sorted(name for name in schema if name.startswith(prefix))
 
 
+def _atomic_parquet(df: pl.DataFrame, path: Path) -> None:
+    """Write a DataFrame to *path* atomically via a sibling temp file + rename.
+
+    On NFS, a direct write to the final path can leave a partially-written file
+    visible to other nodes for the entire duration of the write.  Writing to a
+    unique temp file first and then calling os.replace() (which maps to rename(2),
+    which is atomic on POSIX) ensures that the final path is either absent or
+    fully written — never in an intermediate state.
+
+    The PID-qualified temp name avoids collisions when multiple processes on the
+    same node write to the same directory concurrently.
+    """
+    tmp = path.parent / f".tmp_{os.getpid()}_{path.name}"
+    try:
+        df.write_parquet(tmp, compression="zstd")
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def _write_detailed_stats(
-    scan: pl.LazyFrame,
+    df: pl.DataFrame,
     output_dir: Path,
     batch_num: int,
     detail_cols: list[str],
@@ -46,14 +69,14 @@ def _write_detailed_stats(
         used_names.add(output_name)
         exprs.append(pl.col(col).alias(output_name))
 
-    scan.select(exprs).sink_parquet(
+    _atomic_parquet(
+        df.select(exprs),
         output_dir / f"detailed_stats_batch={batch_num}.parquet",
-        compression="zstd",
     )
 
 
 def _write_decoder_stats(
-    scan: pl.LazyFrame,
+    df: pl.DataFrame,
     output_dir: Path,
     batch_num: int,
     decoder_cols: list[str],
@@ -61,16 +84,14 @@ def _write_decoder_stats(
     if not decoder_cols:
         return
 
-    exprs: list[pl.Expr | str] = [
-        "shot_id",
-    ]
+    exprs: list[pl.Expr | str] = ["shot_id"]
     exprs.extend(
         pl.col(col).alias(col.removeprefix(DECODER_STAT_PREFIX))
         for col in decoder_cols
     )
-    scan.select(exprs).sort("shot_id").sink_parquet(
+    _atomic_parquet(
+        df.select(exprs).sort("shot_id"),
         output_dir / f"decoder_stat_batch={batch_num}.parquet",
-        compression="zstd",
     )
 
 
@@ -97,8 +118,17 @@ def convert_legacy_detail_stats(output_dir: Path) -> None:
 
     Legacy files are left untouched.  Existing new-format files are also left
     untouched so a just-finished batch cannot be overwritten by stale data.
+
+    Writes use the atomic temp-file + rename pattern so that concurrent calls
+    from different batch nodes writing to the same output_dir are safe: each
+    node writes a PID-unique temp file and the final rename is atomic, meaning
+    the destination is always either absent or fully written.
     """
-    for batch_idx, legacy_files in sorted(_legacy_detail_files_by_batch(output_dir).items()):
+    legacy_by_batch = _legacy_detail_files_by_batch(output_dir)
+    if not legacy_by_batch:
+        return
+
+    for batch_idx, legacy_files in sorted(legacy_by_batch.items()):
         target = output_dir / f"detailed_stats_batch={batch_idx}.parquet"
         if target.exists() or not legacy_files:
             continue
@@ -120,7 +150,10 @@ def convert_legacy_detail_stats(output_dir: Path) -> None:
             used_names.add(output_name)
 
         if joined is not None:
-            joined.sort("shot_id").sink_parquet(target, compression="zstd")
+            _atomic_parquet(
+                joined.sort("shot_id").collect(),
+                target,
+            )
 
 
 def collect_results(
@@ -135,14 +168,21 @@ def collect_results(
     if not input_paths:
         raise FileNotFoundError(f"No chunk/part parquet files found in {chunk_dir}")
 
-    scan = pl.scan_parquet([str(path) for path in input_paths])
+    # Read all chunk/part data into memory once.  Using a lazy scan that is
+    # re-evaluated for every sink_parquet call meant the chunk files were read
+    # from NFS multiple times.  Under concurrent load from several batch nodes
+    # writing to the same output_dir, polars' streaming sink_parquet could block
+    # indefinitely waiting for NFS — particularly the sort()-backed decoder_stat
+    # write.  A single eager read avoids repeated NFS round-trips and makes the
+    # subsequent writes simple in-memory operations.
+    df = pl.read_parquet([str(p) for p in input_paths])
 
-    scan.select(["shot_id", "is_logical_error"]).sink_parquet(
+    _atomic_parquet(
+        df.select(["shot_id", "is_logical_error"]),
         output_dir / f"logicalerror_batch={batch_num}.parquet",
-        compression="zstd",
     )
 
-    schema = scan.collect_schema()
+    schema = df.schema
     metric_cols = _prefixed_cols(schema, "metric_")
     if not metric_cols:
         raise ValueError("No metric columns found in chunk outputs")
@@ -156,19 +196,19 @@ def collect_results(
 
     for metric_name in metric_names:
         metric_col = f"metric_{metric_name}"
-        scan.select(["shot_id", pl.col(metric_col).alias(metric_name)]).sink_parquet(
+        _atomic_parquet(
+            df.select(["shot_id", pl.col(metric_col).alias(metric_name)]),
             output_dir / f"metric={metric_name}_batch={batch_num}.parquet",
-            compression="zstd",
         )
 
     _write_detailed_stats(
-        scan,
+        df,
         output_dir,
         batch_num,
         _prefixed_cols(schema, DETAIL_STAT_PREFIX),
     )
     _write_decoder_stats(
-        scan,
+        df,
         output_dir,
         batch_num,
         _prefixed_cols(schema, DECODER_STAT_PREFIX),
@@ -176,7 +216,7 @@ def collect_results(
     convert_legacy_detail_stats(output_dir)
 
     if "obs_flip_idx" in schema:
-        obs_df = scan.select(["shot_id", "obs_flip_idx"]).sort("shot_id").collect()
+        obs_df = df.select(["shot_id", "obs_flip_idx"]).sort("shot_id")
         write_obs_flip_idx_file(
             output_dir / f"obs_flip_idx_batch={batch_num}.bin",
             obs_df["obs_flip_idx"].to_list(),
