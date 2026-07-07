@@ -25,8 +25,7 @@ from decoder_confidence.decoding._argument_reweighting import (
 )
 from decoder_confidence.execution.models import DecoderBase, DecoderFactory
 
-FALLBACK_GAP: float = -32768.0
-FALLBACK_FORCED_GAP: float = 0.0
+_FORCED_UNCONVERGED_CHOICES = frozenset({"positive", "negative"})
 
 _SUPPORTED_METRICS = frozenset(
     {"linearized_logicalgap", "forced_gap_ml", "reweighted_linearized_gap", "argument_reweighting"}
@@ -56,10 +55,26 @@ class _RelayBpAROptions:
 @dataclass(frozen=True)
 class _RelayBpRLGOptions:
     b: float
+    forced_unconverged_confidence_value: str  # "positive" or "negative"
 
     def validate(self) -> None:
         if self.b <= 1.0:
             raise ValueError("b must be > 1 for ratio reweighting")
+        if self.forced_unconverged_confidence_value not in _FORCED_UNCONVERGED_CHOICES:
+            raise ValueError(
+                "forced_unconverged_confidence_value must be 'positive' or 'negative'"
+            )
+
+
+@dataclass(frozen=True)
+class _RelayBpForcedUnconvergedOptions:
+    forced_unconverged_confidence_value: str  # "positive" or "negative"
+
+    def validate(self) -> None:
+        if self.forced_unconverged_confidence_value not in _FORCED_UNCONVERGED_CHOICES:
+            raise ValueError(
+                "forced_unconverged_confidence_value must be 'positive' or 'negative'"
+            )
 
 
 def _parse_relay_bp_metric_options(
@@ -88,9 +103,29 @@ def _parse_relay_bp_metric_options(
         return opts
     if metric == "reweighted_linearized_gap":
         b = metric_options.get("b")
+        forced_value = metric_options.get("forced_unconverged_confidence_value")
         if b is None:
             raise ValueError("metric_options.b is required for reweighted_linearized_gap")
-        opts = _RelayBpRLGOptions(b=float(b))
+        if forced_value is None:
+            raise ValueError(
+                "metric_options.forced_unconverged_confidence_value is required "
+                "for reweighted_linearized_gap"
+            )
+        opts = _RelayBpRLGOptions(
+            b=float(b),
+            forced_unconverged_confidence_value=str(forced_value).strip().lower(),
+        )
+        opts.validate()
+        return opts
+    if metric in ("linearized_logicalgap", "forced_gap_ml"):
+        forced_value = metric_options.get("forced_unconverged_confidence_value")
+        if forced_value is None:
+            raise ValueError(
+                f"metric_options.forced_unconverged_confidence_value is required for {metric}"
+            )
+        opts = _RelayBpForcedUnconvergedOptions(
+            forced_unconverged_confidence_value=str(forced_value).strip().lower(),
+        )
         opts.validate()
         return opts
     return None
@@ -123,24 +158,29 @@ class RelayBpMetricDecoder(DecoderBase):
         predictions = np.zeros((num_shots, num_obs), dtype=np.bool_)
         metric_values: list[Any] = []
         obs_flip_idx: list[list[int]] = []
+        force_logical_error = np.zeros(num_shots, dtype=np.bool_)
 
         for shot in range(num_shots):
             syndrome = syndromes[shot]
             if self.metric == "linearized_logicalgap":
-                pred, mv, ofi = self._shot_linearized_logicalgap(syndrome, num_obs)
+                pred, mv, ofi, fle = self._shot_linearized_logicalgap(syndrome, num_obs)
             elif self.metric == "forced_gap_ml":
-                pred, mv, ofi = self._shot_forced_gap_ml(syndrome, num_obs)
+                pred, mv, ofi, fle = self._shot_forced_gap_ml(syndrome, num_obs)
             elif self.metric == "reweighted_linearized_gap":
-                pred, mv, ofi = self._shot_reweighted_linearized_gap(syndrome, num_obs)
+                pred, mv, ofi, fle = self._shot_reweighted_linearized_gap(syndrome, num_obs)
             else:  # argument_reweighting
-                pred, mv, ofi = self._shot_argument_reweighting(syndrome)
+                pred, mv, ofi, fle = self._shot_argument_reweighting(syndrome)
             predictions[shot] = pred
             metric_values.append(mv)
             obs_flip_idx.append(ofi)
+            force_logical_error[shot] = fle
 
         return DecodingResult(
             predictions=predictions,
-            metrics={self.metric: np.asarray(metric_values)},
+            metrics={
+                self.metric: np.asarray(metric_values),
+                "__is_logical_error": force_logical_error,
+            },
             obs_flip_idx=obs_flip_idx,
         )
 
@@ -173,18 +213,26 @@ class RelayBpMetricDecoder(DecoderBase):
 
     def _shot_linearized_logicalgap(
         self, syndrome: np.ndarray, num_obs: int
-    ) -> tuple[np.ndarray, float, list[int]]:
+    ) -> tuple[np.ndarray, float, list[int], bool]:
+        opts: _RelayBpForcedUnconvergedOptions = self.parsed_options
         converged1, c1, l1, w1 = self._stage1(syndrome)
         pred = l1.astype(np.bool_)
 
-        if not converged1 or num_obs == 0:
-            return pred, FALLBACK_GAP, []
+        if not converged1:
+            return pred, -np.inf, [], True
+
+        forced_value = (
+            np.inf if opts.forced_unconverged_confidence_value == "positive" else -np.inf
+        )
+
+        if num_obs == 0:
+            return pred, forced_value, [], False
 
         stage2 = self._stage2_constrained(syndrome, l1, num_obs)
         converged_w2 = [w for w, _, ok in stage2 if ok]
 
         if not converged_w2:
-            return pred, FALLBACK_GAP, []
+            return pred, forced_value, [], False
 
         best_w2 = min(converged_w2)
         # obs_flip_idx: find best converged solution's logical diff vs l1
@@ -195,21 +243,28 @@ class RelayBpMetricDecoder(DecoderBase):
                 best_flip = list(np.where(diff)[0])
                 break
 
-        return pred, float(best_w2 - w1), best_flip
+        return pred, float(best_w2 - w1), best_flip, False
 
     def _shot_forced_gap_ml(
         self, syndrome: np.ndarray, num_obs: int
-    ) -> tuple[np.ndarray, float, list[int]]:
+    ) -> tuple[np.ndarray, float, list[int], bool]:
+        opts: _RelayBpForcedUnconvergedOptions = self.parsed_options
         converged1, c1, l1, w1 = self._stage1(syndrome)
+        pred = l1.astype(np.bool_)
 
-        if not converged1 or num_obs == 0:
-            return l1.astype(np.bool_), FALLBACK_FORCED_GAP, []
+        if not converged1:
+            return pred, 0.0, [], True
+
+        forced_value = np.inf if opts.forced_unconverged_confidence_value == "positive" else 0.0
+
+        if num_obs == 0:
+            return pred, forced_value, [], False
 
         stage2 = self._stage2_constrained(syndrome, l1, num_obs)
         converged_s2 = [(w, l) for w, l, ok in stage2 if ok]
 
         if not converged_s2:
-            return l1.astype(np.bool_), FALLBACK_FORCED_GAP, []
+            return pred, forced_value, [], False
 
         all_solutions: list[tuple[float, np.ndarray]] = [(w1, l1)] + converged_s2
         all_solutions.sort(key=lambda x: x[0])
@@ -226,28 +281,32 @@ class RelayBpMetricDecoder(DecoderBase):
         gap = (best_diff_weight - ml_weight) if np.isfinite(best_diff_weight) else np.nan
         diff = np.asarray(l1, dtype=int) ^ np.asarray(ml_logical, dtype=int)
         ofi = list(np.where(diff)[0])
-        return pred, float(gap) if not np.isnan(gap) else float("nan"), ofi
+        return pred, float(gap) if not np.isnan(gap) else float("nan"), ofi, False
 
     def _shot_reweighted_linearized_gap(
         self, syndrome: np.ndarray, num_obs: int
-    ) -> tuple[np.ndarray, float, list[int]]:
+    ) -> tuple[np.ndarray, float, list[int], bool]:
         opts: _RelayBpRLGOptions = self.parsed_options
         converged1, c1, l1, w1 = self._stage1(syndrome)
         pred = l1.astype(np.bool_)
 
-        if not converged1 or num_obs == 0:
-            return pred, FALLBACK_GAP, []
+        if not converged1:
+            return pred, -np.inf, [], True
 
-        # Stage 2a: constrained decodes
+        forced_value = (
+            np.inf if opts.forced_unconverged_confidence_value == "positive" else -np.inf
+        )
+
+        if num_obs == 0:
+            return pred, forced_value, [], False
+
+        # Stage 2a: constrained decodes. By construction, each converged instance
+        # differs from l1 in at least the forced observable bit.
         stage2a = self._stage2_constrained(syndrome, l1, num_obs)
         converged_2a = [(w, l) for w, l, ok in stage2a if ok]
+        have_2a = bool(converged_2a)
 
-        if not converged_2a:
-            # No 2a converged → worst confidence regardless of 2b
-            return pred, FALLBACK_GAP, []
-
-        best_w_constrained = min(w for w, _ in converged_2a)
-        # Track best_flip for obs_flip_idx
+        best_w_constrained = min((w for w, _ in converged_2a), default=np.inf)
         best_flip: list[int] = []
         for w, l2 in converged_2a:
             if w == best_w_constrained:
@@ -255,7 +314,8 @@ class RelayBpMetricDecoder(DecoderBase):
                 best_flip = list(np.where(diff)[0])
                 break
 
-        # Stage 2b: reweighted unconstrained decode
+        # Stage 2b: reweighted unconstrained decode (may or may not land on a
+        # logical class different from l1).
         reweighted_priors = _clip_priors(
             _reweight_ratio(self._base_priors.copy(), opts.b, c1)
         )
@@ -264,27 +324,40 @@ class RelayBpMetricDecoder(DecoderBase):
         r_b = self.adapter.decode_detailed_single(syndrome)
         self.adapter.set_priors(self._base_priors.copy())
 
-        if r_b.success:
+        b_converged = bool(r_b.success)
+        l_r_same: bool | None = None
+        w_r: float | None = None
+        if b_converged:
             c_r = np.asarray(r_b.decoding, dtype=np.bool_)
             l_r = _logical_from_correction(self._observables, c_r)
             w_r = float(self._weights @ c_r.astype(int))
             l_r_same = bool(np.array_equal(l_r, l1))
 
+        have_2b_diff = b_converged and not l_r_same
+
+        if not have_2a and not have_2b_diff:
+            # Neither stage produced a converged, differing-class candidate.
+            return pred, forced_value, [], False
+
+        if b_converged:
             if l_r_same and w_r < w1:
                 gap = best_w_constrained - w_r
             elif l_r_same:
                 gap = best_w_constrained - w1
             else:
                 gap = min(best_w_constrained, w_r) - w1
+                if not have_2a:
+                    diff = np.asarray(l1, dtype=int) ^ np.asarray(l_r, dtype=int)
+                    best_flip = list(np.where(diff)[0])
         else:
             # 2b not converged: only 2a results, case a
             gap = best_w_constrained - w1
 
-        return pred, float(gap), best_flip
+        return pred, float(gap), best_flip, False
 
     def _shot_argument_reweighting(
         self, syndrome: np.ndarray
-    ) -> tuple[np.ndarray, bool, list[int]]:
+    ) -> tuple[np.ndarray, bool, list[int], bool]:
         opts: _RelayBpAROptions = self.parsed_options
         num_obs = int(self._observables.shape[0])
 
@@ -298,10 +371,10 @@ class RelayBpMetricDecoder(DecoderBase):
         pred = l0
 
         if not r0.success:
-            return pred, False, []
+            return pred, False, [], True
 
         if not c0.any():
-            return pred, True, []
+            return pred, True, [], False
 
         accepted = True
         prev_c = c0
@@ -330,7 +403,7 @@ class RelayBpMetricDecoder(DecoderBase):
             prev_c = ci
 
         self.adapter.set_priors(self._base_priors.copy())
-        return pred, bool(accepted), []
+        return pred, bool(accepted), [], False
 
 
 def _validate_relay_bp_metric(metric: str, metric_options: Mapping[str, Any]) -> None:

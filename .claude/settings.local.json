@@ -35,7 +35,12 @@
       "Bash(python3)",
       "Bash(git check-ignore *)",
       "Bash(echo \"ignore-exit:$?\")",
-      "Bash(cd /home/quantum_teresheys/workspace/decoder-confidence *)"
+      "Bash(cd /home/quantum_teresheys/workspace/decoder-confidence *)",
+      "Bash(python3 -c \"import stim; print\\(stim.__version__\\)\")",
+      "Bash(mkdir -p /tmp/repro_check)",
+      "Bash(rm -rf /tmp/repro_check)",
+      "Bash(python -m pytest tests/test_relay_bp_metric_decoder.py -v)",
+      "Bash(python -m pytest tests/test_relay_bp_adapter.py tests/test_forcing_degradation.py -v)"
     ],
     "additionalDirectories": [
       "/tmp"
