@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 import polars as pl
 
-from analysis.src.config import PlotConfig, normalize_metric_names
+from analysis.src.config import ConditionalLERConfig, PlotConfig, normalize_metric_names
 
 # Regex to extract the batch index from filenames like "metric=logical_gap_batch=5.parquet"
 # or "logicalerror_batch=5.parquet".
@@ -111,9 +111,10 @@ def _is_circuit_params_dir(name: str) -> bool:
     return "code" in kv and "d" in kv and "p" in kv
 
 
-def _use_linearized_logical_error(config: PlotConfig, metric_name: str) -> bool:
+def _use_linearized_logical_error(config: PlotConfig | ConditionalLERConfig, metric_name: str) -> bool:
+    plot_params = getattr(config, "plot_params", {})
     flag = bool(
-        config.plot_params.get("use_linearize", False)
+        plot_params.get("use_linearize", False)
         or config.extra_options.get("use_linearize", False)
     )
     if flag and metric_name != "forced_gap_ml":
@@ -154,7 +155,7 @@ class SimulationDataManager:
     # Public API
     # ------------------------------------------------------------------
 
-    def query(self, config: PlotConfig) -> pl.LazyFrame:
+    def query(self, config: PlotConfig | ConditionalLERConfig) -> pl.LazyFrame:
         """Scan directories matching *config* and return a concatenated LazyFrame.
 
         The returned LazyFrame is built lazily using :func:`polars.scan_parquet`.
@@ -212,7 +213,7 @@ class SimulationDataManager:
             yield entry, params
 
     def _iter_decoder_dirs(
-        self, circuit_dir: Path, config: PlotConfig, metric_name: str
+        self, circuit_dir: Path, config: PlotConfig | ConditionalLERConfig, metric_name: str
     ) -> Iterator[tuple[Path, dict[str, str]]]:
         """Yield ``(path, parsed_params)`` for each matching decoder/metric directory."""
         decoding_dir = circuit_dir / "decoding_result"
@@ -248,7 +249,7 @@ class SimulationDataManager:
     def _build_frames_for_dir(
         self,
         dm_dir: Path,
-        config: PlotConfig,
+        config: PlotConfig | ConditionalLERConfig,
         all_params: dict[str, str],
         metric_name: str,
     ) -> list[pl.LazyFrame]:
@@ -315,7 +316,7 @@ class SimulationDataManager:
     def _logicalerror_file_for_metric(
         self,
         dm_dir: Path,
-        config: PlotConfig,
+        config: PlotConfig | ConditionalLERConfig,
         metric_name: str,
         batch_idx: int,
     ) -> Path:

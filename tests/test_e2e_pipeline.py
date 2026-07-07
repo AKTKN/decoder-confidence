@@ -137,7 +137,7 @@ def test_step3_decoding_e2e(sampled_output: Path) -> None:
     )
     assert (output_dir / "logicalerror_batch=1.parquet").exists()
     assert (output_dir / "metric=logical_gap_batch=1.parquet").exists()
-    assert (output_dir / "metadata.json").exists()
+    assert (output_dir / "metadata" / "metadata_batch=1.json").exists()
 
 
 @pytest.mark.e2e
@@ -183,4 +183,4 @@ def test_step3_decoding_cplex_e2e(sampled_output_phen: Path) -> None:
     )
     assert (output_dir / "logicalerror_batch=1.parquet").exists()
     assert (output_dir / "metric=logical_gap_batch=1.parquet").exists()
-    assert (output_dir / "metadata.json").exists()
+    assert (output_dir / "metadata" / "metadata_batch=1.json").exists()

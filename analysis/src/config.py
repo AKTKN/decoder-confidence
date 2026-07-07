@@ -132,6 +132,10 @@ class ConditionalLERConfig:
         :meth:`~ConditionalLERAnalyzer.plot_fitting` must be a 2-element
         sequence ``(ax_negative, ax_positive)``. Mainly intended for metrics
         that take both signs, e.g. ``"linearize_logicalgap"``.
+    extra_options:
+        Reserved for future extensibility (e.g. decoder filters). Consumed by
+        :class:`~analysis.src.data_manager.SimulationDataManager`, which
+        shares its directory-scanning logic with :class:`PlotConfig`.
     """
 
     metric_name: str | List[str]
@@ -147,3 +151,4 @@ class ConditionalLERConfig:
     convert_db: bool = False
     metric_labels: Dict[str, str] = field(default_factory=dict)
     split_by_sign: bool = False
+    extra_options: Dict[str, Any] = field(default_factory=dict)

@@ -18,7 +18,11 @@ from decoder_confidence.decoding.incomplete import (
     INCOMPLETE_SHOTS_FILENAME,
     write_incomplete_shots,
 )
-from decoder_confidence.decoding.metadata import build_decoding_metadata, write_metadata
+from decoder_confidence.decoding.metadata import (
+    build_decoding_metadata,
+    metadata_file_path,
+    write_metadata,
+)
 from decoder_confidence.decoding.result_collection import cleanup_intermediate
 from decoder_confidence.execution.manager import ExecutionConfig, run_manager
 from decoder_confidence.execution.models import IncompleteTasksError
@@ -221,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         metrics_recorded=metrics_recorded,
         incomplete_ranges=outcome.incomplete,
     )
-    write_metadata(output_dir / "metadata.json", metadata)
+    write_metadata(metadata_file_path(output_dir, args.batch_num), metadata)
 
     if outcome.incomplete:
         total = sum(r.shot_id_end - r.shot_id_start for r in outcome.incomplete)

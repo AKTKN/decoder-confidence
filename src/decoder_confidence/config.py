@@ -8,6 +8,11 @@ from pathlib import Path
 
 UINT64_MAX = 2**64 - 1
 
+#: Detector-sampling strategies selectable via ``--sampling_method``. See
+#: ``decoder_confidence.sampling.sampler.SAMPLING_METHODS`` for the semantics
+#: of each option.
+SAMPLING_METHODS = ("unified", "per_batch_seed")
+
 @dataclass(frozen=True)
 class SamplingConfig:
 	code: str
@@ -20,6 +25,7 @@ class SamplingConfig:
 	det_sample_seed: int
 	num_batch: int
 	xyz_decoding: bool
+	sampling_method: str = "unified"
 
 @dataclass
 class DecodingResult:
@@ -88,6 +94,22 @@ def parse_args(argv: list[str] | None = None) -> SamplingConfig:
 		type=_parse_bool,
 		help="If true, keep detectors for both X and Z basis",
 	)
+	parser.add_argument(
+		"--sampling_method",
+		required=False,
+		default="unified",
+		choices=list(SAMPLING_METHODS),
+		help=(
+			"Detector-sampling strategy. 'unified' (default): draw all num_shots "
+			"in a single call keyed on det_sample_seed, then deterministically "
+			"slice the result into batches -- the sampled shots do not depend on "
+			"num_batch. 'per_batch_seed': legacy pre-2026-06-25 behavior that "
+			"compiles one sampler per batch with seed = det_sample_seed + "
+			"(batch_index - 1) -- the sampled shots depend on num_batch. Use "
+			"'per_batch_seed' only to reproduce or compare against runs "
+			"generated before the fix."
+		),
+	)
 
 	args = parser.parse_args(argv)
 
@@ -110,4 +132,5 @@ def parse_args(argv: list[str] | None = None) -> SamplingConfig:
 		det_sample_seed=args.det_sample_seed,
 		num_batch=args.num_batch,
 		xyz_decoding=bool(args.xyz_decoding),
+		sampling_method=args.sampling_method,
 	)

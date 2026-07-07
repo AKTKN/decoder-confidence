@@ -19,3 +19,4 @@ export PYTHONPATH="$ROOT_DIR/src"
 	--xyz_decoding False \
     --det_sample_seed 0 \
     --num_batch 1 \
+    --sampling_method unified \

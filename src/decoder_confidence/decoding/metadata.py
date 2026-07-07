@@ -82,10 +82,14 @@ def _peak_rss_mb() -> float:
 
 
 def _check_matrix_shape(
-    dem: stim.DetectorErrorModel, decoder_name: str
+    dem: stim.DetectorErrorModel,
 ) -> tuple[int | None, int | None]:
-    if decoder_name.upper() != "ILP":
-        return None, None
+    """Return the (rows, cols) shape of the DEM's check matrix.
+
+    Computed directly from the DEM, so it is populated for every decoder
+    (not only ILP, which previously was the only decoder this was reported
+    for).
+    """
     try:
         from beliefmatching import detector_error_model_to_check_matrices
     except ImportError:
@@ -96,6 +100,16 @@ def _check_matrix_shape(
     )
     check_matrix = mats.check_matrix
     return int(check_matrix.shape[0]), int(check_matrix.shape[1])
+
+
+def metadata_file_path(output_dir: Path, batch_num: int) -> Path:
+    """Per-batch metadata path: ``<output_dir>/metadata/metadata_batch=<N>.json``.
+
+    Each batch writes to its own file (rather than a single shared
+    ``metadata.json``) so that concurrently-running batches never overwrite
+    each other's metadata.
+    """
+    return output_dir / "metadata" / f"metadata_batch={batch_num}.json"
 
 
 def _incomplete_entries(
@@ -136,7 +150,7 @@ def build_decoding_metadata(
         summary.ok_duration_s / summary.ok_shots if summary.ok_shots else None
     )
 
-    check_rows, check_cols = _check_matrix_shape(dem, decoder_info.decoder_name)
+    check_rows, check_cols = _check_matrix_shape(dem)
     random_seed = decoder_info.decoder_options.get("random_seed")
     solver_options = decoder_info.decoder_options.get("solver_options")
     incomplete_shots = sum(

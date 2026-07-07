@@ -5,7 +5,40 @@
       "Bash(python3 -m pytest tests/test_argument_reweighting.py -q)",
       "Bash(python3 -m pytest tests/test_argument_reweighting.py::test_predictions_shape -q)",
       "Bash(git stash *)",
-      "Bash(python3 -m pytest tests/test_argument_reweighting.py tests/test_e2e_pipeline.py -v)"
+      "Bash(python3 -m pytest tests/test_argument_reweighting.py tests/test_e2e_pipeline.py -v)",
+      "Bash(python3 /tmp/claude-1000/-home-quantum-teresheys-workspace-decoder-confidence/7b0bcdd6-2a08-4f0c-a644-aaa7f9b1545d/scratchpad/raw_sample_check.py)",
+      "Bash(sed -i 's/obs_flip_counts += obs_bits.sum\\(axis=0\\)/obs_flip_counts += obs_bits.sum\\(axis=0\\).astype\\(np.int64\\)/' /tmp/claude-1000/-home-quantum-teresheys-workspace-decoder-confidence/7b0bcdd6-2a08-4f0c-a644-aaa7f9b1545d/scratchpad/raw_sample_check.py)",
+      "Bash(python3 /tmp/claude-1000/-home-quantum-teresheys-workspace-decoder-confidence/7b0bcdd6-2a08-4f0c-a644-aaa7f9b1545d/scratchpad/check_shotid_integrity.py)",
+      "Skill(dataviz)",
+      "Skill(dataviz:*)",
+      "Bash(python3 -c ' *)",
+      "Bash(cat)",
+      "Bash(python3 compare_old_new.py)",
+      "Bash(ls simulation_data_old/code=bivariate_bicycle_code_Z,d=6,rounds=6,noisemodel=uniform,p=0.003,use_both=False,ibm_reproduce=True,xyz=False/decoding_result/decoder=BP-LSD,metric=forced_gap_ml,get_all_failure_rate=True,get_detail_stat=True)",
+      "Bash(echo \"--- metadata ---\")",
+      "Bash(cat simulation_data_old/code=bivariate_bicycle_code_Z,d=6,rounds=6,noisemodel=uniform,p=0.003,use_both=False,ibm_reproduce=True,xyz=False/decoding_result/decoder=BP-LSD,metric=forced_gap_ml,get_all_failure_rate=True,get_detail_stat=True/metadata.json)",
+      "Bash(python3 scan_risk.py)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\({k:d[k] for k in ['num_batch','num_shots','batch_sizes','det_sample_seed']}\\)\")",
+      "Bash(xargs ls -la)",
+      "Bash(python -m pytest tests/test_sampling_batches.py -q)",
+      "Bash(python -m pytest tests/ -q -k \"sampling or config or metadata or dem\")",
+      "Bash(rm -rf /tmp/step2_smoketest)",
+      "Bash(PYTHONPATH=src python -m decoder_confidence.sampling --code hgp_code_Z --out_dir /tmp/step2_smoketest --noise_model phenomenological --rounds 6 --d 6 --p 0.01 --num_shots 10 --xyz_decoding False --det_sample_seed 0 --num_batch 2 --sampling_method per_batch_seed)",
+      "Read(//tmp/**)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python3 -c \"import beliefmatching; print\\(beliefmatching.__file__\\)\")",
+      "Bash(python3 -)",
+      "Bash(python -m pytest tests/ -q -m \"not e2e\")",
+      "Bash(python -m pytest tests/test_e2e_pipeline.py -q -m e2e)",
+      "Bash(python3 -c \"import ilp_decoder\")",
+      "Bash(python3 -c \"import cplex\")",
+      "Bash(python3)",
+      "Bash(git check-ignore *)",
+      "Bash(echo \"ignore-exit:$?\")",
+      "Bash(cd /home/quantum_teresheys/workspace/decoder-confidence *)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
     ]
   }
 }

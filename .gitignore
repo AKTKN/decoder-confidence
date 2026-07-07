@@ -68,7 +68,9 @@ example_outdir/
 refs/
 raw_data/
 commands/fetch_cluster.sh
+commsnds/extract_tar.sh
 simulation_data/
+simulation_data_old/
 buf/
 # Latex project 
 Decoder confidence for general qLDPC codes/

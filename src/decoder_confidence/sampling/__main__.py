@@ -104,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             layout.sampled_data_dir,
             batch_sizes,
             config.det_sample_seed,
+            sampling_method=config.sampling_method,
         )
 
     except (FileNotFoundError, FileExistsError, ValueError) as exc:

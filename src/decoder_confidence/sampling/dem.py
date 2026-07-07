@@ -248,6 +248,7 @@ def build_metadata(
 		"num_batch": config.num_batch,
 		"batch_sizes": batch_sizes,
 		"det_sample_seed": config.det_sample_seed,
+		"sampling_method": config.sampling_method,
 		"xyz_decoding": config.xyz_decoding,
 		"circuit_id": circuit_path.stem,
 		"circuit_path": str(circuit_path),

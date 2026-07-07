@@ -21,6 +21,13 @@ from analysis.src.analyzers import (
     ConditionalLERAnalyzer,
     NumericMetricAnalyzer,
 )
+from analysis.src.anchored_reselection import (
+    AnchoredReselectionAnalyzer,
+    AnchoredReselectionConfig,
+    BinScale,
+    TransitionCategory,
+    DEFAULT_CATEGORY_ORDER,
+)
 from analysis.src.case_histogram import (
     CaseScatterConfig,
     ForcedGapMLCaseAnalyzer,
@@ -447,4 +454,70 @@ def draw_gap_threshold_case_fractions(
         config,
         ax,
         threshold=threshold,
+    )
+
+
+def draw_reselection_transition(
+    manager: SimulationDataManager,
+    config: AnchoredReselectionConfig,
+    ax: plt.Axes,
+    *,
+    bins: int | Sequence[float] = 10,
+    bin_scale: BinScale = "gap_value",
+    x_range: tuple[float, float] | None = None,
+    category_order: Sequence[TransitionCategory] = DEFAULT_CATEGORY_ORDER,
+    bar_kw: dict[str, Any] | None = None,
+) -> plt.Axes:
+    """Draw the stacked-bar reselection-transition chart (diagnostic plot a).
+
+    Shows, within the negative-anchored subset ``A = {Delta_anc < 0}``, the
+    conditional fractions of shots that are fixed / broken / left wrong /
+    left correct by the ordinary forced-gap reselection.  ``bin_scale``
+    selects whether bars are binned by raw ``Delta_fg`` value (default) or
+    by the corresponding forced-gap abort rate, which puts the x-axis on the
+    same rejection-rate scale as :func:`draw_postselection_decomposition`.
+    ``x_range`` optionally fixes the ``(min, max)`` binned range (units of
+    ``bin_scale``) instead of using the observed range within ``A``; values
+    outside it are clamped into the first/last bin.
+    """
+    return AnchoredReselectionAnalyzer().plot_reselection_transition(
+        manager,
+        config,
+        ax,
+        bins=bins,
+        bin_scale=bin_scale,
+        x_range=x_range,
+        category_order=category_order,
+        bar_kw=bar_kw,
+    )
+
+
+def draw_postselection_decomposition(
+    manager: SimulationDataManager,
+    config: AnchoredReselectionConfig,
+    ax: plt.Axes,
+    *,
+    abort_rates: Sequence[float] | None = None,
+    num_points: int = 30,
+    max_multiple: float = 2.0,
+    alpha: float = 0.05,
+    mark_r_minus: bool = True,
+    plot_kw: dict[str, Any] | None = None,
+) -> plt.Axes:
+    """Draw the decision/ranking decomposition of the post-selection advantage (plot b).
+
+    Plots ``D_decision(r)``, ``D_ranking(r)``, and their sum ``D_total(r) =
+    L_fg(r) - L_anc(r)`` as functions of the matched rejection rate ``r``,
+    with a vertical marker at ``r_minus = P(Delta_anc < 0)``.
+    """
+    return AnchoredReselectionAnalyzer().plot_postselection_decomposition(
+        manager,
+        config,
+        ax,
+        abort_rates=abort_rates,
+        num_points=num_points,
+        max_multiple=max_multiple,
+        alpha=alpha,
+        mark_r_minus=mark_r_minus,
+        plot_kw=plot_kw,
     )

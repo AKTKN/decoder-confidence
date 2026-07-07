@@ -6,7 +6,27 @@ from pathlib import Path
 import numpy as np
 import stim
 
-from decoder_confidence.config import validate_seed
+from decoder_confidence.config import UINT64_MAX, validate_seed
+
+#: Detector-sampling strategies selectable via ``--sampling_method``.
+#:
+#: ``unified`` (default, current behavior): draw all ``num_shots`` in a single
+#: call keyed on ``det_sample_seed`` and deterministically slice the result
+#: into batches.  The sampled shot set is independent of ``num_batch``.
+#:
+#: ``per_batch_seed`` (legacy, pre-2026-06-25 behavior): compile one sampler
+#: per batch with ``seed = det_sample_seed + (batch_index - 1)``.  The sampled
+#: shot set depends on ``num_batch`` even when ``num_shots`` and
+#: ``det_sample_seed`` are unchanged.  Kept only to reproduce/compare against
+#: runs generated before the fix; new runs should use ``unified``.
+SAMPLING_METHODS = ("unified", "per_batch_seed")
+
+
+def _validate_sampling_method(sampling_method: str) -> None:
+	if sampling_method not in SAMPLING_METHODS:
+		raise ValueError(
+			f"sampling_method must be one of {SAMPLING_METHODS} but got {sampling_method!r}"
+		)
 
 
 def _batch_offsets(batch_sizes: list[int]) -> list[tuple[int, int]]:
@@ -20,17 +40,29 @@ def _batch_offsets(batch_sizes: list[int]) -> list[tuple[int, int]]:
 	return offsets
 
 
+def _per_batch_seed(det_sample_seed: int, batch_index: int) -> int:
+	seed = det_sample_seed + (batch_index - 1)
+	if seed > UINT64_MAX:
+		raise ValueError(
+			f"det_sample_seed + batch_index must be <= {UINT64_MAX} but got {seed}"
+		)
+	validate_seed(seed)
+	return seed
+
+
 def sample_batches(
 	circuit: stim.Circuit,
 	sampled_data_dir: Path,
 	batch_sizes: list[int],
 	det_sample_seed: int,
 	*,
+	sampling_method: str = "unified",
 	append_observables: bool = True,
 	sample_format: str = "b8",
 ) -> list[Path]:
 	if sample_format != "b8":
 		raise ValueError(f"sample_batches only supports 'b8', got {sample_format!r}")
+	_validate_sampling_method(sampling_method)
 
 	sampled_data_dir.mkdir(parents=True, exist_ok=True)
 	outputs: list[Path] = []
@@ -40,11 +72,30 @@ def sample_batches(
 
 	validate_seed(det_sample_seed)
 
-	# 2026-06-25: The previous implementation compiled one sampler per batch
-	# with seed = det_sample_seed + batch_index - 1.  That made the sampled
-	# shot set depend on num_batch even when num_shots and det_sample_seed were
-	# unchanged.  The current implementation samples the full experiment once
-	# with det_sample_seed, then writes deterministic slices to batch files.
+	if sampling_method == "per_batch_seed":
+		# Legacy behavior: one sampler per batch, seed = det_sample_seed +
+		# (batch_index - 1).  The sampled shot set depends on num_batch.
+		for batch_index, shots in enumerate(batch_sizes, start=1):
+			if shots <= 0:
+				continue
+			out_path = sampled_data_dir / f"det_batch={batch_index}.{sample_format}"
+			if out_path.exists():
+				logging.info("Skipping existing batch file: %s", out_path)
+				continue
+
+			seed = _per_batch_seed(det_sample_seed, batch_index)
+			sampler = circuit.compile_detector_sampler(seed=seed)
+			sampler.sample_write(
+				shots=shots,
+				filepath=out_path,
+				format=sample_format,
+				append_observables=append_observables,
+			)
+			outputs.append(out_path)
+		return outputs
+
+	# unified (default): sample the full experiment once with det_sample_seed,
+	# then write deterministic slices to batch files.
 	sampler = circuit.compile_detector_sampler(seed=det_sample_seed)
 	data = sampler.sample(total_shots, append_observables=append_observables)
 
@@ -87,6 +138,7 @@ def sample_batches_from_dem(
 	batch_sizes: list[int],
 	det_sample_seed: int,
 	*,
+	sampling_method: str = "unified",
 	sample_format: str = "b8",
 ) -> list[Path]:
 	"""Sample directly from a DetectorErrorModel and write per-batch b8 files.
@@ -104,7 +156,11 @@ def sample_batches_from_dem(
 		dem: Filtered DetectorErrorModel.
 		sampled_data_dir: Directory in which to write per-batch b8 files.
 		batch_sizes: Number of shots per batch.
-		det_sample_seed: Base random seed for the full one-shot sample.
+		det_sample_seed: Base seed. Under "unified" this seeds the single
+			full-experiment sample; under "per_batch_seed" it is the base seed
+			for the batch-local seed = det_sample_seed + (batch_index - 1).
+		sampling_method: "unified" (default) or "per_batch_seed" (legacy).
+			See :data:`SAMPLING_METHODS`.
 		sample_format: Only "b8" is supported.
 
 	Returns:
@@ -112,6 +168,7 @@ def sample_batches_from_dem(
 	"""
 	if sample_format != "b8":
 		raise ValueError(f"sample_batches_from_dem only supports 'b8', got {sample_format!r}")
+	_validate_sampling_method(sampling_method)
 
 	sampled_data_dir.mkdir(parents=True, exist_ok=True)
 	outputs: list[Path] = []
@@ -121,10 +178,30 @@ def sample_batches_from_dem(
 
 	validate_seed(det_sample_seed)
 
-	# 2026-06-25: The old batch-local sampling scheme used seeds
-	# det_sample_seed, det_sample_seed + 1, ... for separate batch samplers.
-	# With the same total shots, changing num_batch therefore changed the
-	# sampled population.  We now sample total_shots once and split the resulting
+	if sampling_method == "per_batch_seed":
+		# Legacy behavior (pre-2026-06-25): one sampler per batch, seed =
+		# det_sample_seed + (batch_index - 1).  With the same total shots,
+		# changing num_batch therefore changes the sampled population.
+		for batch_index, shots in enumerate(batch_sizes, start=1):
+			if shots <= 0:
+				continue
+			out_path = sampled_data_dir / f"det_batch={batch_index}.{sample_format}"
+			if out_path.exists():
+				logging.info("Skipping existing batch file: %s", out_path)
+				continue
+
+			seed = _per_batch_seed(det_sample_seed, batch_index)
+			sampler = dem.compile_sampler(seed=seed)
+			# Returns (dets, obs, errors); errors is None by default.
+			dets, obs, _ = sampler.sample(shots)
+
+			# Concatenate detector bits and observable bits, then write as b8.
+			data = np.concatenate([dets, obs], axis=1)
+			_write_b8(out_path, data)
+			outputs.append(out_path)
+		return outputs
+
+	# unified (default): sample total_shots once and split the resulting
 	# array, matching "sample once, then partition" semantics.
 	sampler = dem.compile_sampler(seed=det_sample_seed)
 	# Returns (dets, obs, errors); errors is None by default.
