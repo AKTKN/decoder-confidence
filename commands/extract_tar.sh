@@ -15,8 +15,8 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Edit these two paths before running the script.
 # ---------------------------------------------------------------------------
-INPUT_TAR="/home/quantum_teresheys/workspace/decoder-confidence/simulation_data/backup_20260706_101107.tar"
-OUTPUT_DIR="/home/quantum_teresheys/workspace/decoder-confidence/simulation_data"
+INPUT_TAR="/home/quantum_teresheys/workspace/decoder-confidence/simulation_result/backup_20260709_094314.tar"
+OUTPUT_DIR="/home/quantum_teresheys/workspace/decoder-confidence/simulation_result"
 # ---------------------------------------------------------------------------
 
 if [[ ! -f "$INPUT_TAR" ]]; then

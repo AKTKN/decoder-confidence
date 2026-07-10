@@ -136,6 +136,14 @@ class ConditionalLERConfig:
         Reserved for future extensibility (e.g. decoder filters). Consumed by
         :class:`~analysis.src.data_manager.SimulationDataManager`, which
         shares its directory-scanning logic with :class:`PlotConfig`.
+    write_forced_unconv_line:
+        Only supported for ``"forced_gap_ml"`` and ``"linearize_logicalgap"``.
+        When ``True``, :meth:`~ConditionalLERAnalyzer.plot_conditional_ler`
+        additionally draws a horizontal dotted line at the conditional
+        logical-error rate among shots whose stage-2 forced decode never
+        converged (metric value ``+inf``, off the finite-gap x-range) --
+        i.e. ``P(logical_error | metric == +inf)`` -- in the same color as
+        that metric's/group's curve.
     """
 
     metric_name: str | List[str]
@@ -152,3 +160,4 @@ class ConditionalLERConfig:
     metric_labels: Dict[str, str] = field(default_factory=dict)
     split_by_sign: bool = False
     extra_options: Dict[str, Any] = field(default_factory=dict)
+    write_forced_unconv_line: bool = False

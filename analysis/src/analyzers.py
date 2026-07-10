@@ -50,8 +50,15 @@ _INTERNAL_PLOT_PARAMS = frozenset(
         "use_negative_gap",
         "convert_db",
         "use_linearize",
+        "write_forced_unconv_line",
     }
 )
+
+# Metrics for which the "stage-2 forced decode never converged" placeholder
+# value (+inf, under forced_unconverged_confidence_value='positive') is
+# meaningful. See RelayBpMetricDecoder._shot_forced_gap_ml /
+# _shot_linearized_logicalgap in src/decoder_confidence/decoding/_relay_bp.py.
+_FORCED_UNCONV_METRICS = frozenset({"forced_gap_ml", "linearize_logicalgap"})
 
 # Metrics for which gap → dB conversion is meaningful.
 _GAP_METRICS = frozenset({"logical_gap", "linearize_logicalgap", "forced_gap_ml"})
@@ -350,6 +357,13 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
     * ``"use_negative_gap"`` – flip logical-error shots negative (bool).
     * ``"use_linearize"`` – for ``forced_gap_ml``, use the
       ``linearize_logicalgap`` logical-error labels instead of the local ones.
+    * ``"write_forced_unconv_line"`` – only for ``forced_gap_ml`` and
+      ``linearize_logicalgap``. Draws a horizontal dotted line at the shot
+      count of the "stage-2 forced decode never converged" placeholder value
+      (``+inf``, off the visible finite-gap x-range). When
+      ``config.separate_logical_error`` is ``True``, draws two lines split by
+      outcome: red for shots that are logical errors, blue for shots that
+      are not — matching the existing red/blue error-split scatter style.
 
     All other ``plot_params`` keys are forwarded to :func:`matplotlib.axes.Axes.scatter`.
     """
@@ -370,6 +384,9 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
         round_digits = _normalize_round_digits(config.plot_params.get("round_digits"))
         use_negative_gap = bool(config.plot_params.get("use_negative_gap", False))
         convert_db = bool(config.plot_params.get("convert_db", False))
+        write_forced_unconv_line = bool(
+            config.plot_params.get("write_forced_unconv_line", False)
+        )
 
         if use_negative_gap:
             invalid = [n for n in metric_names if n not in _GAP_METRICS]
@@ -385,12 +402,22 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
                     "convert_db is only supported for gap metrics: "
                     + ", ".join(sorted(_GAP_METRICS))
                 )
+        if write_forced_unconv_line:
+            invalid = [n for n in metric_names if n not in _FORCED_UNCONV_METRICS]
+            if invalid:
+                raise ValueError(
+                    "write_forced_unconv_line is only supported for: "
+                    + ", ".join(sorted(_FORCED_UNCONV_METRICS))
+                )
 
         style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
 
         for metric_name in metric_names:
             df = _collect_for_plot(lf, metric_name, partition_keys)
             display_name = config.metric_labels.get(metric_name, metric_name)
+
+            if write_forced_unconv_line:
+                self._draw_forced_unconv_line(ax, df, metric_name, config)
 
             scatter_kw = {k: v for k, v in config.plot_params.items()
                           if k not in _INTERNAL_PLOT_PARAMS}
@@ -691,6 +718,41 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
             unique_vals, counts = np.unique(values, return_counts=True)
             ax.scatter(unique_vals, counts, label=label, **scatter_kw)
 
+    def _draw_forced_unconv_line(
+        self,
+        ax: plt.Axes,
+        df: pl.DataFrame,
+        metric_name: str,
+        config: PlotConfig,
+    ) -> None:
+        """Draw the "stage-2 forced decode never converged" count as a horizontal line.
+
+        Those shots get a ``+inf`` placeholder value (under
+        ``forced_unconverged_confidence_value='positive'``) that never shows
+        up in the finite-gap histogram, so their frequency is surfaced here
+        instead. Uses the raw (pre-round/pre-sign-flip) metric column so the
+        detection is unaffected by ``round_digits``/``use_negative_gap``.
+        """
+        sub = df.select([metric_name, "is_logical_error"]).drop_nulls(
+            [metric_name, "is_logical_error"]
+        )
+        raw = sub[metric_name].to_numpy().astype(float)
+        is_error = sub["is_logical_error"].to_numpy().astype(bool)
+        unconverged = np.isposinf(raw)
+
+        line_kw = {"linestyle": ":", "linewidth": 1.2, "alpha": 0.8, "label": "_nolegend_"}
+        if config.separate_logical_error:
+            n_err = int((unconverged & is_error).sum())
+            n_ok = int((unconverged & ~is_error).sum())
+            if n_err > 0:
+                ax.axhline(n_err, color="red", **line_kw)
+            if n_ok > 0:
+                ax.axhline(n_ok, color="blue", **line_kw)
+        else:
+            n_unconv = int(unconverged.sum())
+            if n_unconv > 0:
+                ax.axhline(n_unconv, color="black", **line_kw)
+
     def _extract_values(
         self,
         df: pl.DataFrame,
@@ -924,6 +986,15 @@ class ConditionalLERAnalyzer:
         else:
             style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
 
+        if config.write_forced_unconv_line and not any(
+            n in _FORCED_UNCONV_METRICS for n in metric_names
+        ):
+            raise ValueError(
+                "write_forced_unconv_line has no effect: none of "
+                f"{metric_names} support it. Supported metrics: "
+                + ", ".join(sorted(_FORCED_UNCONV_METRICS))
+            )
+
         for metric_name in metric_names:
             _validate_conditional_metric(metric_name)
             metric_config = replace(config, metric_name=metric_name)
@@ -1097,6 +1168,15 @@ class ConditionalLERAnalyzer:
             capsize=3,
             alpha=0.8,
         )
+
+        if config.write_forced_unconv_line and config.metric_name in _FORCED_UNCONV_METRICS:
+            unconverged = np.isposinf(x)
+            if unconverged.any():
+                unconv_rate = float(y[unconverged].mean())
+                ax.axhline(
+                    unconv_rate, color=color, linestyle=":",
+                    linewidth=1.2, alpha=0.8, label="_nolegend_",
+                )
 
         if config.show_sigmoid_fit and (
             config.metric_name == "logical_gap"

@@ -71,7 +71,10 @@ commands/fetch_cluster.sh
 commsnds/extract_tar.sh
 simulation_data/
 simulation_data_old/
+simulation_result/
+parallel_conflict/
 buf/
+relay_too_slow/
 # Latex project 
 Decoder confidence for general qLDPC codes/
 

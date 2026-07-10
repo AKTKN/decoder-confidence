@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
+from analysis.src.case_histogram import _CIRCUIT_PARAM_KEYS
 from analysis.src.config import PlotConfig
 from analysis.src.confidence import shade_ci, wilson_ci
 from analysis.src.data_manager import SimulationDataManager
@@ -80,6 +81,38 @@ class PostSelectSpec:
         When ``True`` and ``metric_name == "linearize_logicalgap"``, overlay a
         star marker at the operating point obtained by discarding all shots
         with ``linearize_logicalgap <= 0``.
+    separate_unconverged:
+        Only supported for ``linearize_logicalgap`` and ``forced_gap_ml``
+        (RELAY-BP's ``get_detail_stat=True`` directories). When ``True``,
+        shots whose first-stage (baseline) decode failed to converge
+        (``decoder_stat``'s ``baseline_iteration`` is NaN) are treated as a
+        forced-error, always-aborted category rather than being swept over
+        with the normal gap threshold — their placeholder gap value does not
+        reflect real confidence. The curve then starts from the operating
+        point that aborts exactly these shots and accepts every converged
+        shot, after which it proceeds through finite gap thresholds as
+        usual. That starting point's post-selected LER is also drawn as a
+        horizontal dotted reference line, in the same color as the curve.
+    exact_gap_ranking:
+        Only supported for ``linearize_logicalgap`` and ``forced_gap_ml``.
+        When ``True``, per-shot logical-error labels (``is_logical_error``)
+        still come from ``metric_name``'s own decoder/metric directory, but
+        the value used to rank shots for post-selection (the abort
+        threshold sweep, ``mark_zero_gap``, ``separate_unconverged``, etc.)
+        is replaced by the shot-matched ``logical_gap`` value (typically
+        from the exact ``ILP`` decoder) instead of ``metric_name``'s own gap
+        value. The two datasets are joined on ``shot_id`` (plus shared
+        circuit-parameter columns). Raises ``FileNotFoundError`` if no
+        ``logical_gap`` data is found, or ``ValueError`` if the join leaves
+        no matching shots. A spec with ``exact_gap_ranking=True`` and one
+        with ``exact_gap_ranking=False`` for the same ``metric_name`` can be
+        passed together to :meth:`PostSelectionPlotter.plot` to draw both on
+        the same axes; unless ``label_prefix`` is set, ``" (exact gap
+        ranking)"`` is appended to the legend label to tell them apart.
+    exact_gap_decoder_names:
+        Only used when ``exact_gap_ranking=True``. Decoder name(s) to load
+        the ``logical_gap`` values from (e.g. ``["ILP"]``). ``None``
+        includes every decoder found on disk for ``logical_gap``.
     """
 
     metric_name: str
@@ -98,20 +131,40 @@ class PostSelectSpec:
     random_split: Optional[bool] = None
     n_splits: Optional[int] = None
     split_seed: Optional[int] = None
+    separate_unconverged: bool = False
+    exact_gap_ranking: bool = False
+    exact_gap_decoder_names: Optional[List[str]] = None
 
     def __post_init__(self) -> None:
         split_metric = self.metric_name in {"linearize_logicalgap", "forced_gap_ml"}
-        split_values = (self.random_split, self.n_splits)
-        if any(value is not None for value in split_values):
+        if self.random_split is not None or self.n_splits is not None:
             if not split_metric:
                 raise ValueError(
                     "random_split/n_splits options are only supported for "
                     "linearize_logicalgap and forced_gap_ml"
                 )
-            if any(value is None for value in split_values):
-                raise ValueError(
-                    "random_split and n_splits must be specified together"
-                )
+            if self.n_splits is not None and self.random_split is None:
+                raise ValueError("n_splits requires random_split to be specified")
+            # random_split=True needs n_splits to pick out a specific split
+            # count; random_split=False directories may or may not encode
+            # n_splits in their name (e.g. "...,random_split=False" with no
+            # n_splits key at all), so n_splits stays optional in that case.
+            if self.random_split is True and self.n_splits is None:
+                raise ValueError("random_split=True requires n_splits to be specified")
+        if self.separate_unconverged and not split_metric:
+            raise ValueError(
+                "separate_unconverged is only supported for "
+                "linearize_logicalgap and forced_gap_ml"
+            )
+        if self.exact_gap_ranking and not split_metric:
+            raise ValueError(
+                "exact_gap_ranking is only supported for "
+                "linearize_logicalgap and forced_gap_ml"
+            )
+        if self.exact_gap_decoder_names is not None and not self.exact_gap_ranking:
+            raise ValueError(
+                "exact_gap_decoder_names requires exact_gap_ranking=True"
+            )
 
     def decoder_query_options(self) -> dict[str, Any]:
         """Return decoder-directory filters for this split configuration.
@@ -127,20 +180,38 @@ class PostSelectSpec:
 
         if self.random_split is None:
             if detail_filter:
-                return {
+                options: dict[str, Any] = {
                     "decoder_filters": detail_filter,
                     "decoder_exclude_keys": ["random_split", "randon_split", "n_splits"],
                 }
-            return {"decoder_exclude_keys": ["random_split", "randon_split", "n_splits", "get_detail_stat"]}
+            else:
+                options = {
+                    "decoder_exclude_keys": ["random_split", "randon_split", "n_splits", "get_detail_stat"]
+                }
+        else:
+            filters: dict[str, Any] = {
+                **detail_filter,
+                "random_split": bool(self.random_split),
+            }
+            exclude_keys: list[str] = []
+            if self.n_splits is not None:
+                filters["n_splits"] = int(self.n_splits)
+            else:
+                exclude_keys.append("n_splits")
+            if self.split_seed is not None:
+                filters["split_seed"] = int(self.split_seed)
+            elif exclude_keys:
+                exclude_keys.append("split_seed")
 
-        filters: dict[str, Any] = {
-            **detail_filter,
-            "n_splits": int(self.n_splits),
-        }
-        if self.split_seed is not None:
-            filters["split_seed"] = int(self.split_seed)
-        filters["random_split"] = bool(self.random_split)
-        return {"decoder_filters": filters}
+            options = {"decoder_filters": filters}
+            if exclude_keys:
+                options["decoder_exclude_keys"] = exclude_keys
+
+        if self.separate_unconverged:
+            options["extra_stat_files"] = [
+                {"file_stem": "decoder_stat", "columns": ["baseline_iteration"]}
+            ]
+        return options
 
 
 @dataclass
@@ -473,15 +544,28 @@ class PostSelectionPlotter:
             },
         )
         lf = self.manager.query(plot_config)
+        if spec.exact_gap_ranking:
+            lf = self._join_exact_gap_ranking(lf, spec)
 
         needed = [spec.metric_name, "is_logical_error"] + list(spec.group_by)
         if direction == "boolean":
             needed.append("b")
+        if spec.separate_unconverged:
+            needed.append("baseline_iteration")
         schema_names = set(lf.collect_schema().names())
         existing = [c for c in dict.fromkeys(needed) if c in schema_names]
         df = lf.select(existing).collect()
 
+        if spec.exact_gap_ranking and df.height == 0:
+            raise ValueError(
+                "exact_gap_ranking=True: no shots remain after joining "
+                f"'{spec.metric_name}' with 'logical_gap' data on shot_id "
+                f"(filters={spec.filters}). Check that logical_gap data exists "
+                "for the same shots."
+            )
+
         prefix = f"{spec.label_prefix} " if spec.label_prefix else ""
+        suffix = " (exact gap ranking)" if spec.exact_gap_ranking else ""
 
         if spec.group_by:
             partitions: dict[tuple, pl.DataFrame] = df.partition_by(
@@ -491,17 +575,59 @@ class PostSelectionPlotter:
                 part_df = partitions[key_vals]
                 key_tuple = key_vals if isinstance(key_vals, tuple) else (key_vals,)
                 group_label = _format_label(list(zip(spec.group_by, key_tuple)))
-                label = f"{prefix}{spec.metric_name} | {group_label}"
+                label = f"{prefix}{spec.metric_name} | {group_label}{suffix}"
                 self._compute_and_plot(
                     part_df, spec, direction, ax,
                     num_points, alpha, shade_alpha, plot_kw, label, reduction_rate,
                 )
         else:
-            label = f"{prefix}{spec.metric_name}"
+            label = f"{prefix}{spec.metric_name}{suffix}"
             self._compute_and_plot(
                 df, spec, direction, ax,
                 num_points, alpha, shade_alpha, plot_kw, label, reduction_rate,
             )
+
+    def _join_exact_gap_ranking(
+        self, lf: pl.LazyFrame, spec: PostSelectSpec
+    ) -> pl.LazyFrame:
+        """Replace *lf*'s ``spec.metric_name`` column with shot-matched ``logical_gap``.
+
+        ``is_logical_error`` and every other column of *lf* are left as-is —
+        they still come from ``spec.metric_name``'s own decoder/metric
+        directory. Only the ranking value itself is overwritten so
+        downstream logic (threshold sweeps, ``mark_zero_gap``,
+        ``separate_unconverged``, ...) can keep referring to
+        ``spec.metric_name`` unchanged.
+        """
+        logical_gap_config = PlotConfig(
+            metric_name="logical_gap",
+            decoder_names=spec.exact_gap_decoder_names,
+            filters=spec.filters,
+            batch_indices=spec.batch_indices,
+        )
+        try:
+            lg_lf = self.manager.query(logical_gap_config)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                "exact_gap_ranking=True requires 'logical_gap' data, but none "
+                f"was found for filters={spec.filters}: {exc}"
+            ) from exc
+
+        schema_main = set(lf.collect_schema().names())
+        schema_lg = set(lg_lf.collect_schema().names())
+        join_keys = ["shot_id"] + [
+            k for k in _CIRCUIT_PARAM_KEYS if k in schema_main and k in schema_lg
+        ]
+
+        lg_cols = list(
+            dict.fromkeys([k for k in join_keys if k in schema_lg] + ["logical_gap"])
+        )
+        lg_lf = lg_lf.select(lg_cols).rename({"logical_gap": "__exact_gap_ranking_value"})
+
+        joined = lf.join(lg_lf, on=join_keys, how="inner")
+        return joined.drop(spec.metric_name).rename(
+            {"__exact_gap_ranking_value": spec.metric_name}
+        )
 
     def _compute_and_plot(
         self,
@@ -516,16 +642,22 @@ class PostSelectionPlotter:
         label: str,
         reduction_rate: bool,
     ) -> None:
+        baseline_ler: Optional[float] = None
         if direction == "boolean":
             curve = postselect_curve_ar(df, spec.metric_name, alpha=alpha)
             original_ler = df["is_logical_error"].mean()
+        elif spec.separate_unconverged:
+            sub = df.drop_nulls([spec.metric_name, "is_logical_error"])
+            curve, original_ler, baseline_ler = self._compute_curve_separate_unconverged(
+                sub, spec, direction, num_points, alpha,
+            )
         else:
             sub = df.drop_nulls([spec.metric_name, "is_logical_error"])
             values = sub[spec.metric_name].to_numpy().astype(float)
 
             if spec.round_digit is not None:
                 values = np.round(values, spec.round_digit)
-                
+
             is_error = sub["is_logical_error"].to_numpy().astype(bool)
             if spec.threshold_mode == "unique":
                 curve = postselect_curve_unique_thresholds(
@@ -577,6 +709,15 @@ class PostSelectionPlotter:
             ax, curve.abort_rates, ci_lo, ci_hi,
             color=line.get_color(), alpha=shade_alpha,
         )
+        if baseline_ler is not None:
+            y_base = baseline_ler
+            if reduction_rate:
+                y_base = y_base / original_ler if original_ler and original_ler > 0 else None
+            if y_base is not None and not np.isnan(y_base):
+                ax.axhline(
+                    y_base, color=line.get_color(), linestyle=":",
+                    linewidth=1.2, alpha=0.8, label="_nolegend_",
+                )
         self._plot_zero_gap_marker(
             ax=ax,
             df=df,
@@ -587,6 +728,60 @@ class PostSelectionPlotter:
             original_ler=original_ler,
             color=line.get_color(),
         )
+
+    def _compute_curve_separate_unconverged(
+        self,
+        sub: pl.DataFrame,
+        spec: PostSelectSpec,
+        direction: str,
+        num_points: int,
+        alpha: float,
+    ) -> tuple[PostSelectCurve, float, Optional[float]]:
+        """Post-selection curve that always aborts stage-1-unconverged shots first.
+
+        Shots whose baseline (first-stage) decode failed to converge get a
+        placeholder gap value (e.g. 0 for ``forced_gap_ml``, ``-inf`` for
+        ``linearize_logicalgap``) that does not reflect real confidence, so
+        they are pulled out of the normal threshold sweep entirely. The
+        sweep runs only over the remaining (converged) shots, but abort
+        rates stay expressed relative to the full shot count, so the curve's
+        first point is exactly "abort every unconverged shot, accept every
+        converged shot" and later points proceed through finite gap values
+        as usual.
+        """
+        n_total = sub.height
+        unconverged_mask = sub["baseline_iteration"].is_nan()
+        converged = sub.filter(~unconverged_mask)
+        unconverged = sub.filter(unconverged_mask)
+
+        values = converged[spec.metric_name].to_numpy().astype(float)
+        if spec.round_digit is not None:
+            values = np.round(values, spec.round_digit)
+        is_error = converged["is_logical_error"].to_numpy().astype(bool)
+
+        if spec.threshold_mode == "unique":
+            curve = postselect_curve_unique_thresholds(values, is_error, direction, alpha=alpha)
+        else:
+            curve = postselect_curve_continuous(
+                values, is_error, direction,
+                num_points=num_points, alpha=alpha, grid_scale=spec.grid_scale,
+            )
+
+        if n_total > 0 and curve.abort_rates.size > 0:
+            curve.abort_rates = 1.0 - curve.accepted / n_total
+
+        original_ler = float(sub["is_logical_error"].to_numpy().mean()) if n_total > 0 else np.nan
+
+        baseline_ler: Optional[float] = None
+        if unconverged.height > 0 and values.size > 0:
+            baseline = postselect_point_at_threshold(
+                values, is_error, threshold=float(np.min(values)),
+                direction=direction, alpha=alpha, inclusive=True,
+            )
+            if baseline.accepted.size > 0 and baseline.accepted[0] > 0:
+                baseline_ler = float(baseline.post_lers[0])
+
+        return curve, original_ler, baseline_ler
 
     def _plot_zero_gap_marker(
         self,

@@ -44,8 +44,13 @@ from analysis.src.ranking_degradation import (
     collect_ranking_shot_table,
 )
 from analysis.src.metric_correlation import (
+    MetricHeatmapBins,
+    MetricHeatmapConfig,
     MetricPairConfig,
+    compute_metric_heatmap_bins,
     concordance_correlation_coefficient,
+    plot_metric_conditional_error_heatmap,
+    plot_metric_count_heatmap,
     plot_metric_scatter,
 )
 from analysis.src.metric_spearman import (
@@ -179,6 +184,11 @@ __all__ = [
     "MetricPairConfig",
     "concordance_correlation_coefficient",
     "plot_metric_scatter",
+    "MetricHeatmapConfig",
+    "MetricHeatmapBins",
+    "compute_metric_heatmap_bins",
+    "plot_metric_count_heatmap",
+    "plot_metric_conditional_error_heatmap",
     "SpearmanConfig",
     "compute_spearman_matrix",
     "plot_spearman_heatmap",

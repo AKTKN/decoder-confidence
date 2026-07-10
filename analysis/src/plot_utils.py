@@ -502,13 +502,20 @@ def draw_postselection_decomposition(
     max_multiple: float = 2.0,
     alpha: float = 0.05,
     mark_r_minus: bool = True,
+    relative: bool = False,
     plot_kw: dict[str, Any] | None = None,
 ) -> plt.Axes:
     """Draw the decision/ranking decomposition of the post-selection advantage (plot b).
 
-    Plots ``D_decision(r)``, ``D_ranking(r)``, and their sum ``D_total(r) =
-    L_fg(r) - L_anc(r)`` as functions of the matched rejection rate ``r``,
-    with a vertical marker at ``r_minus = P(Delta_anc < 0)``.
+    ``relative=False`` (default) plots ``D_decision(r)``, ``D_ranking(r)``,
+    and their sum ``D_total(r) = L_fg(r) - L_anc(r)`` as functions of the
+    matched rejection rate ``r``, with a vertical marker at ``r_minus =
+    P(Delta_anc < 0)``.
+
+    ``relative=True`` plots only ``D_total_relative(r) = L_fg(r) / L_anc(r)``
+    instead -- a single ratio curve, better suited to a log y-axis than the
+    absolute difference (which shrinks toward 0 even when the two LERs
+    differ by a large multiplicative factor).
     """
     return AnchoredReselectionAnalyzer().plot_postselection_decomposition(
         manager,
@@ -519,5 +526,6 @@ def draw_postselection_decomposition(
         max_multiple=max_multiple,
         alpha=alpha,
         mark_r_minus=mark_r_minus,
+        relative=relative,
         plot_kw=plot_kw,
     )

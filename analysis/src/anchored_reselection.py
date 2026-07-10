@@ -484,7 +484,9 @@ def compute_postselection_decomposition_curve(
         Columns ``abort_rate``, ``r_minus`` (constant column, ``P(Delta_anc
         < 0)``), ``L_anc``, ``L_anc_ci_low``, ``L_anc_ci_high``, ``L_fg``,
         ``L_fg_ci_low``, ``L_fg_ci_high``, ``D_decision``, ``D_ranking``,
-        ``D_total`` (``= L_fg - L_anc = D_decision + D_ranking``).
+        ``D_total`` (``= L_fg - L_anc = D_decision + D_ranking``),
+        ``D_total_relative`` (``= L_fg / L_anc``; ``NaN`` when ``L_anc`` is
+        ``0`` or undefined).
     """
     df = collect_anchored_reselection_shot_table(manager, config)
     delta_anc = df["delta_anc"].to_numpy().astype(float)
@@ -527,6 +529,9 @@ def compute_postselection_decomposition_curve(
 
         d_decision = (p_ystar_acc_fg - p_y0_acc_fg) / denom if denom > 0 else np.nan
         d_ranking = (p_y0_acc_fg - p_y0_acc_anc) / denom if denom > 0 else np.nan
+        d_total_relative = (
+            l_fg / l_anc if (not np.isnan(l_anc) and l_anc > 0 and not np.isnan(l_fg)) else np.nan
+        )
 
         rows.append(
             {
@@ -541,6 +546,7 @@ def compute_postselection_decomposition_curve(
                 "D_decision": d_decision,
                 "D_ranking": d_ranking,
                 "D_total": d_decision + d_ranking,
+                "D_total_relative": d_total_relative,
             }
         )
 
@@ -676,9 +682,21 @@ class AnchoredReselectionAnalyzer:
         max_multiple: float = 2.0,
         alpha: float = 0.05,
         mark_r_minus: bool = True,
+        relative: bool = False,
         plot_kw: dict[str, Any] | None = None,
     ) -> plt.Axes:
-        """Draw ``D_decision(r)``, ``D_ranking(r)``, and ``D_total(r)`` for plot (b)."""
+        """Draw the decomposition of the post-selection advantage for plot (b).
+
+        ``relative=False`` (default) draws the absolute decomposition:
+        ``D_decision(r)``, ``D_ranking(r)``, and ``D_total(r) = L_fg(r) -
+        L_anc(r)``.
+
+        ``relative=True`` draws only ``D_total^rel(r) = L_fg(r) / L_anc(r)``
+        (a single curve) instead -- useful on a log y-axis, since a small
+        absolute ``D_total`` can still correspond to a large ratio between
+        two already-small LERs (see ``D_total_relative`` in
+        :func:`compute_postselection_decomposition_curve`).
+        """
         df = compute_postselection_decomposition_curve(
             manager, config,
             abort_rates=abort_rates, num_points=num_points,
@@ -687,20 +705,31 @@ class AnchoredReselectionAnalyzer:
         plot_kw = {"marker": "o", "markersize": 4, **(plot_kw or {})}
         r = df["abort_rate"].to_numpy()
 
-        ax.plot(r, df["D_decision"].to_numpy(), label=r"$D_{\rm decision}(r)$", **plot_kw)
-        ax.plot(r, df["D_ranking"].to_numpy(), label=r"$D_{\rm ranking}(r)$", **plot_kw)
-        ax.plot(
-            r, df["D_total"].to_numpy(),
-            label=r"$D_{\rm total}(r) = L_{\rm fg}(r) - L_{\rm anc}(r)$",
-            color="black", linestyle="--", **{**plot_kw, "marker": "s"},
-        )
-        ax.axhline(0.0, color="gray", linewidth=0.8, linestyle=":")
+        if relative:
+            ax.plot(
+                r, df["D_total_relative"].to_numpy(),
+                label=r"$D_{\rm total}^{\rm rel}(r) = L_{\rm fg}(r) / L_{\rm anc}(r)$",
+                color="black", linestyle="--", **{**plot_kw, "marker": "s"},
+            )
+            ax.axhline(1.0, color="gray", linewidth=0.8, linestyle=":")
+        else:
+            ax.plot(r, df["D_decision"].to_numpy(), label=r"$D_{\rm decision}(r)$", **plot_kw)
+            ax.plot(r, df["D_ranking"].to_numpy(), label=r"$D_{\rm ranking}(r)$", **plot_kw)
+            ax.plot(
+                r, df["D_total"].to_numpy(),
+                label=r"$D_{\rm total}(r) = L_{\rm fg}(r) - L_{\rm anc}(r)$",
+                color="black", linestyle="--", **{**plot_kw, "marker": "s"},
+            )
+            ax.axhline(0.0, color="gray", linewidth=0.8, linestyle=":")
 
         if mark_r_minus and df.height > 0:
             r_minus = float(df["r_minus"][0])
             ax.axvline(r_minus, color="gray", linewidth=1.0, linestyle="--", label=r"$r_-=P(\Delta_{\rm anc}<0)$")
 
         ax.set_xlabel(r"Matched rejection rate $r$")
-        ax.set_ylabel(r"$L_{\rm fg}(r) - L_{\rm anc}(r)$ decomposition")
+        if relative:
+            ax.set_ylabel(r"$L_{\rm fg}(r) / L_{\rm anc}(r)$")
+        else:
+            ax.set_ylabel(r"$L_{\rm fg}(r) - L_{\rm anc}(r)$ decomposition")
         ax.legend()
         return ax

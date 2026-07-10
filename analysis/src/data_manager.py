@@ -255,6 +255,7 @@ class SimulationDataManager:
     ) -> list[pl.LazyFrame]:
         """Return one LazyFrame per batch file found in *dm_dir*."""
         frames: list[pl.LazyFrame] = []
+        extra_stat_files = config.extra_options.get("extra_stat_files", [])
 
         for metric_file in sorted(dm_dir.glob(f"metric={metric_name}_batch=*.parquet")):
             batch_idx = _extract_batch_idx(metric_file.name)
@@ -281,9 +282,36 @@ class SimulationDataManager:
                 batch_idx,
                 metric_name,
             )
+            lf = self._join_extra_stat_files(lf, dm_dir, batch_idx, extra_stat_files)
             frames.append(lf)
 
         return frames
+
+    def _join_extra_stat_files(
+        self,
+        lf: pl.LazyFrame,
+        dm_dir: Path,
+        batch_idx: int,
+        extra_stat_files: list[dict[str, Any]],
+    ) -> pl.LazyFrame:
+        """Left-join extra per-batch stat files (e.g. ``decoder_stat``) onto *lf*.
+
+        ``extra_stat_files`` entries look like
+        ``{"file_stem": "decoder_stat", "columns": ["baseline_iteration"]}`` and
+        select ``{file_stem}_batch={batch_idx}.parquet`` from *dm_dir*.
+        """
+        for entry in extra_stat_files:
+            file_stem = entry["file_stem"]
+            columns = list(entry["columns"])
+            stat_file = dm_dir / f"{file_stem}_batch={batch_idx}.parquet"
+            if not stat_file.exists():
+                raise FileNotFoundError(
+                    f"extra_stat_files requested '{file_stem}' but no matching file "
+                    f"was found for batch={batch_idx} under {dm_dir}"
+                )
+            stat_lf = pl.scan_parquet(stat_file).select(["shot_id", *columns])
+            lf = lf.join(stat_lf, on="shot_id", how="inner")
+        return lf
 
     def _build_single_frame(
         self,
