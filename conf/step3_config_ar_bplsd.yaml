@@ -13,6 +13,6 @@ metric_options:
   # Reweighting test: "Ratio" or "Gap"
   test_type: Ratio
   # Ratio test: b > 1 (larger → more aggressive reweighting)
-  b: 1.01
+  b: 1.1
   # Number of decode-reweight rounds (>= 2)
   num_decoding_rounds: 2

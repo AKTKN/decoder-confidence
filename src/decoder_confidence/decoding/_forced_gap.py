@@ -49,6 +49,9 @@ from decoder_confidence.execution.models import DecoderBase, DecoderFactory
 #      (normal success; does not fall into any of cases 0-3).
 
 
+_FORCED_UNCONVERGED_CHOICES = frozenset({"positive", "negative"})
+
+
 @dataclass(frozen=True)
 class ForcedGapMLOptions:
     """Options for the forced_gap_ml metric."""
@@ -60,6 +63,7 @@ class ForcedGapMLOptions:
     split_seed: int = 0
     split_balanced: bool = False
     cluster_llr_alpha: float = 2.0
+    forced_unconverged_confidence_value: str | None = None  # "positive" or "negative"
 
     @property
     def constrained_decode_options(self) -> ConstrainedDecodeOptions:
@@ -82,6 +86,7 @@ def _parse_forced_gap_ml_options(metric_options: Mapping[str, Any]) -> ForcedGap
         "n_splits",
         "split_seed",
         "split_balanced",
+        "forced_unconverged_confidence_value",
     }
     unknown = sorted(set(options) - allowed)
     if unknown:
@@ -95,6 +100,16 @@ def _parse_forced_gap_ml_options(metric_options: Mapping[str, Any]) -> ForcedGap
     get_detail_stat = bool(options.get("get_detail_stat", False))
     alpha_raw = options.get("alpha", options.get("cluster_llr_alpha", 2.0))
     alpha = float(alpha_raw) if str(alpha_raw).lower() != "inf" else np.inf
+
+    forced_unconverged_raw = options.get("forced_unconverged_confidence_value")
+    forced_unconverged: str | None = None
+    if forced_unconverged_raw is not None:
+        forced_unconverged = str(forced_unconverged_raw).strip().lower()
+        if forced_unconverged not in _FORCED_UNCONVERGED_CHOICES:
+            raise ValueError(
+                "forced_unconverged_confidence_value must be 'positive' or 'negative'"
+            )
+
     return ForcedGapMLOptions(
         get_all_failure_rate=get_all_failure_rate,
         get_detail_stat=get_detail_stat,
@@ -103,6 +118,7 @@ def _parse_forced_gap_ml_options(metric_options: Mapping[str, Any]) -> ForcedGap
         split_seed=int(options.get("split_seed", 0)),
         split_balanced=bool(options.get("split_balanced", False)),
         cluster_llr_alpha=alpha,
+        forced_unconverged_confidence_value=forced_unconverged,
     )
 
 
@@ -132,11 +148,17 @@ class ForcedGapMLDecoder(DecoderBase):
         self._weights: np.ndarray = _weights_from_priors(self._base_priors)
         self._partition_cache: dict[int, Any] = {}
         self._decoder_stat_kind: str | None = None
+        self._relay_bp_adapter = isinstance(self.adapter, RelayBpDecoderAdapter)
+        if self._relay_bp_adapter and self.options.forced_unconverged_confidence_value is None:
+            raise ValueError(
+                "metric_options.forced_unconverged_confidence_value is required when "
+                "using relay-bp with the forced_gap_ml metric"
+            )
         if self.options.get_detail_stat:
             if isinstance(self.adapter, BpLsdDecoderAdapter):
                 self.adapter.enable_lsd_statistics()
                 self._decoder_stat_kind = "cluster_llr"
-            elif isinstance(self.adapter, RelayBpDecoderAdapter):
+            elif self._relay_bp_adapter:
                 self._decoder_stat_kind = "iteration"
             else:
                 warnings.warn(
@@ -146,12 +168,17 @@ class ForcedGapMLDecoder(DecoderBase):
                     stacklevel=2,
                 )
 
-    def _decode_with_decoder_stat(self, syndrome: np.ndarray) -> tuple[np.ndarray, float | None]:
-        if self._decoder_stat_kind == "iteration":
+    def _decode_with_decoder_stat(
+        self, syndrome: np.ndarray
+    ) -> tuple[np.ndarray, float | None, bool]:
+        if self._relay_bp_adapter:
             assert isinstance(self.adapter, RelayBpDecoderAdapter)
             result = self.adapter.decode_detailed_single(syndrome)
-            stat = float(result.iterations) if bool(result.success) else np.nan
-            return np.asarray(result.decoding, dtype=np.bool_), stat
+            converged = bool(result.success)
+            stat = None
+            if self._decoder_stat_kind == "iteration":
+                stat = float(result.iterations) if converged else np.nan
+            return np.asarray(result.decoding, dtype=np.bool_), stat, converged
 
         correction = np.asarray(self.adapter.decode(syndrome), dtype=np.bool_)
         if self._decoder_stat_kind == "cluster_llr":
@@ -166,8 +193,9 @@ class ForcedGapMLDecoder(DecoderBase):
                     w_e,
                     self.options.cluster_llr_alpha,
                 ),
+                True,
             )
-        return correction, None
+        return correction, None, True
 
     def decode(
         self,
@@ -210,6 +238,10 @@ class ForcedGapMLDecoder(DecoderBase):
             forced_std_stat = np.full((num_shots,), np.nan, dtype=float)
             forced_max_stat = np.full((num_shots,), np.nan, dtype=float)
 
+        force_logical_error = (
+            np.zeros((num_shots,), dtype=np.bool_) if self._relay_bp_adapter else None
+        )
+
         for shot in range(num_shots):
             syndrome = syndromes[shot]
 
@@ -218,7 +250,7 @@ class ForcedGapMLDecoder(DecoderBase):
                 self._base_check_matrix,
                 self._base_priors.copy(),
             )
-            c1, stat1 = self._decode_with_decoder_stat(syndrome)
+            c1, stat1, converged1 = self._decode_with_decoder_stat(syndrome)
 
             l1 = _logical_from_correction(self._observables, c1)
             w1 = float(self._weights @ c1.astype(int))
@@ -228,6 +260,16 @@ class ForcedGapMLDecoder(DecoderBase):
                 stage1_obs_flip[shot] = _is_obs_flip(l1, obs_shot)
                 if stat1 is not None:
                     baseline_stat[shot] = stat1
+
+            if self._relay_bp_adapter and not converged1:
+                # Baseline never converged: skip Stage 2 entirely and force the shot
+                # to be counted as a logical error.
+                gap[shot] = 0.0
+                predictions[shot] = l1.astype(np.bool_)
+                obs_flip_idx.append([])
+                assert force_logical_error is not None
+                force_logical_error[shot] = True
+                continue
 
             # Collect all solutions: list of (weight, logical_class)
             all_solutions: list[tuple[float, np.ndarray]] = [(w1, l1)]
@@ -255,7 +297,9 @@ class ForcedGapMLDecoder(DecoderBase):
                         constrained.check_matrix,
                         constrained.priors.copy(),
                     )
-                    c2_full, stat2 = self._decode_with_decoder_stat(constrained.syndrome)
+                    c2_full, stat2, converged2 = self._decode_with_decoder_stat(
+                        constrained.syndrome
+                    )
                     c2 = c2_full[: constrained.physical_cols]
 
                     l2 = _logical_from_correction(self._observables, c2)
@@ -263,8 +307,9 @@ class ForcedGapMLDecoder(DecoderBase):
                     if stat2 is not None:
                         stage2_stats.append(float(stat2))
                     stage2_logicals.append(l2)
-                    stage2_solutions.append((w2_i, l2, stat2))
-                    all_solutions.append((w2_i, l2))
+                    if (not self._relay_bp_adapter) or converged2:
+                        stage2_solutions.append((w2_i, l2, stat2))
+                        all_solutions.append((w2_i, l2))
 
                 # Restore original state for the next shot
                 self.adapter.set_check_matrix_and_priors(
@@ -285,7 +330,18 @@ class ForcedGapMLDecoder(DecoderBase):
                 if not np.array_equal(l, ml_logical):
                     best_diff_weight = w
                     break
-            gap[shot] = (best_diff_weight - ml_weight) if np.isfinite(best_diff_weight) else np.nan
+
+            if self._relay_bp_adapter and len(all_solutions) == 1:
+                # num_obs == 0, or every Stage-2 instance failed to converge.
+                gap[shot] = (
+                    np.inf
+                    if self.options.forced_unconverged_confidence_value == "positive"
+                    else 0.0
+                )
+            else:
+                gap[shot] = (
+                    (best_diff_weight - ml_weight) if np.isfinite(best_diff_weight) else np.nan
+                )
 
             diff = np.asarray(l1, dtype=int) ^ np.asarray(ml_logical, dtype=int)
             obs_flip_idx.append(list(np.where(diff)[0]))
@@ -333,6 +389,8 @@ class ForcedGapMLDecoder(DecoderBase):
         metrics: dict[str, Any] = {"forced_gap_ml": gap}
         if compute_cases:
             metrics["forced_gap_ml_case"] = case_labels
+        if force_logical_error is not None:
+            metrics["__is_logical_error"] = force_logical_error
         detail_stats: dict[str, Any] = {}
         decoder_stats: dict[str, Any] = {}
         if self.options.get_detail_stat:

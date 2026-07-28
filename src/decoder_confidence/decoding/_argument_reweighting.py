@@ -8,7 +8,11 @@ import numpy as np
 import stim
 
 from decoder_confidence.config import DecodingResult
-from decoder_confidence.decoding._decoder_adapter import DecoderAdapter, build_decoder_adapter
+from decoder_confidence.decoding._decoder_adapter import (
+	DecoderAdapter,
+	RelayBpDecoderAdapter,
+	build_decoder_adapter,
+)
 from decoder_confidence.execution.models import DecoderBase, DecoderFactory
 
 
@@ -125,6 +129,14 @@ class ArgumentReweightingDecoder(DecoderBase):
 		self._base_priors = _clip_priors(self.adapter.priors)
 		self._observables = self.adapter.observables_matrix
 		self._num_errors = self.adapter.num_errors
+		self._relay_bp_adapter = isinstance(self.adapter, RelayBpDecoderAdapter)
+
+	def _decode_round0(self, syndrome: np.ndarray) -> tuple[np.ndarray, bool]:
+		if self._relay_bp_adapter:
+			assert isinstance(self.adapter, RelayBpDecoderAdapter)
+			result = self.adapter.decode_detailed_single(syndrome)
+			return np.asarray(result.decoding, dtype=np.bool_), bool(result.success)
+		return np.asarray(self.adapter.decode(syndrome), dtype=np.bool_), True
 
 	def decode(self, syndromes: np.ndarray) -> DecodingResult:
 		syndromes = np.asarray(syndromes, dtype=int)
@@ -138,18 +150,27 @@ class ArgumentReweightingDecoder(DecoderBase):
 
 		predictions = np.zeros((num_shots, num_obs), dtype=np.bool_)
 		accept = np.zeros((num_shots,), dtype=np.bool_)
+		force_logical_error = (
+			np.zeros((num_shots,), dtype=np.bool_) if self._relay_bp_adapter else None
+		)
 
 		for shot in range(num_shots):
 			syndrome = syndromes[shot]
 			priors = self._base_priors.copy()
 			self.adapter.set_priors(priors)
 
-			c0 = np.asarray(self.adapter.decode(syndrome), dtype=np.bool_)
+			c0, converged0 = self._decode_round0(syndrome)
 			if c0.shape[0] != self._num_errors:
 				raise ValueError("decoder correction length does not match priors")
 
 			base_logical = _logical_from_c(self._observables, c0).astype(np.bool_)
 			predictions[shot] = base_logical
+
+			if self._relay_bp_adapter and not converged0:
+				accept[shot] = False
+				assert force_logical_error is not None
+				force_logical_error[shot] = True
+				continue
 
 			if not c0.any():
 				accept[shot] = True
@@ -175,9 +196,13 @@ class ArgumentReweightingDecoder(DecoderBase):
 
 			accept[shot] = True if accepted else False
 
+		metrics: dict[str, Any] = {self.metric_name: accept}
+		if force_logical_error is not None:
+			metrics["__is_logical_error"] = force_logical_error
+
 		return DecodingResult(
 			predictions=predictions,
-			metrics={self.metric_name: accept},
+			metrics=metrics,
 		)
 
 

@@ -21,7 +21,6 @@ from decoder_confidence.decoding._lsd_cluster_metric import make_cluster_llr_fac
 from decoder_confidence.decoding._reweighted_linearized_gap import (
     make_reweighted_linearized_gap_factory,
 )
-from decoder_confidence.decoding._relay_bp import make_relay_bp_factory
 from decoder_confidence.execution.models import DecoderFactory
 
 
@@ -220,18 +219,6 @@ def load_decoder_factory(
         from decoder_confidence.decoding._vibelsd import make_vibelsd_factory
 
         factory = make_vibelsd_factory(dem_path, decoder_options)
-        info = DecoderConfigInfo(
-            decoder_name=decoder_name,
-            metric_name=metric_name,
-            decoder_options=dict(decoder_options),
-            metric_options=dict(metric_options),
-            config_path=config_path,
-            raw_config=dict(config),
-        )
-        return factory, info
-
-    if decoder_name == "RELAY-BP":
-        factory = make_relay_bp_factory(dem_path, decoder_options, metric_name, metric_options)
         info = DecoderConfigInfo(
             decoder_name=decoder_name,
             metric_name=metric_name,
