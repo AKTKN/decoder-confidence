@@ -1,0 +1,83 @@
+{
+  "result_dir_root": "/home/quantum_teresheys/workspace/decoder-confidence/simulation_data",
+  "decoder_names": [
+    "BP-LSD"
+  ],
+  "target_filters": {
+    "d": 6,
+    "p": 0.003,
+    "noisemodel": "uniform",
+    "code": "bivariate_bicycle_code_Z",
+    "rounds": 6
+  },
+  "sweep_filters_base": {
+    "d": 6,
+    "noisemodel": "uniform",
+    "code": "bivariate_bicycle_code_Z",
+    "rounds": 6
+  },
+  "alpha": 0.05,
+  "target": {
+    "p": 0.003,
+    "n_loaded": 1000000,
+    "n_excluded": 0,
+    "n_total": 1000000,
+    "n_neg": 25060,
+    "n_zero": 1261,
+    "n_pos": 974940,
+    "q": 0.02506,
+    "q_ci_low": 0.024755462780003134,
+    "q_ci_high": 0.02536818613088433,
+    "eps": 0.017808,
+    "eps_ci_low": 0.017550634934684006,
+    "eps_ci_high": 0.018069069692508162,
+    "eps_minus": 0.589584996009577,
+    "eps_minus_ci_low": 0.5834813649962236,
+    "eps_minus_ci_high": 0.5956611661826847,
+    "eps_plus": 0.003110960674503046,
+    "eps_plus_ci_low": 0.0030023587542066695,
+    "eps_plus_ci_high": 0.0032234782639935927,
+    "concentration": 0.8296832884097035,
+    "concentration_ci_low": 0.8240912272531423,
+    "concentration_ci_high": 0.8351331447550187,
+    "p_y2_given_neg": 0.5345570630486831,
+    "p_y2_given_neg_ci_low": 0.5283765144982031,
+    "p_y2_given_neg_ci_high": 0.5407270186870683,
+    "consistency_lhs": 0.017808,
+    "consistency_rhs": 0.017808,
+    "consistency_ok": true
+  },
+  "sweep": [
+    {
+      "p": 0.003,
+      "n_loaded": 1000000,
+      "n_excluded": 0,
+      "n_total": 1000000,
+      "n_neg": 25060,
+      "n_zero": 1261,
+      "n_pos": 974940,
+      "q": 0.02506,
+      "q_ci_low": 0.024755462780003134,
+      "q_ci_high": 0.02536818613088433,
+      "eps": 0.017808,
+      "eps_ci_low": 0.017550634934684006,
+      "eps_ci_high": 0.018069069692508162,
+      "eps_minus": 0.589584996009577,
+      "eps_minus_ci_low": 0.5834813649962236,
+      "eps_minus_ci_high": 0.5956611661826847,
+      "eps_plus": 0.003110960674503046,
+      "eps_plus_ci_low": 0.0030023587542066695,
+      "eps_plus_ci_high": 0.0032234782639935927,
+      "concentration": 0.8296832884097035,
+      "concentration_ci_low": 0.8240912272531423,
+      "concentration_ci_high": 0.8351331447550187,
+      "p_y2_given_neg": 0.5345570630486831,
+      "p_y2_given_neg_ci_low": 0.5283765144982031,
+      "p_y2_given_neg_ci_high": 0.5407270186870683,
+      "consistency_lhs": 0.017808,
+      "consistency_rhs": 0.017808,
+      "consistency_ok": true
+    }
+  ],
+  "slide_sentence_ja": "Δ_anc < 0 のショットは全体の 2.5% にすぎないが、論理エラーの 83% がこの領域に集中する"
+}

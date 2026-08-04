@@ -20,7 +20,7 @@ Multiple metrics can be plotted on the same axes by passing several
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -113,6 +113,20 @@ class PostSelectSpec:
         Only used when ``exact_gap_ranking=True``. Decoder name(s) to load
         the ``logical_gap`` values from (e.g. ``["ILP"]``). ``None``
         includes every decoder found on disk for ``logical_gap``.
+    second_solution_gap_threshold:
+        Only supported for ``linearize_logicalgap``. Must be negative (or
+        ``None``, the default, which leaves the ordinary threshold sweep
+        untouched). Shots whose ``linearize_logicalgap`` value falls below
+        this threshold are re-decided using the stage-2 forced/reselected
+        candidate instead of the stage-1 prediction: the shot's error label
+        switches from ``is_logical_error`` to the ``"forced_logical_error"``
+        detail-stat column, and its gap value's sign is flipped to positive
+        (adopting the alternative answer is treated as a high-confidence
+        decision, the same convention used elsewhere for accepted/positive
+        gap). Shots at or above the threshold are unaffected. Requires
+        ``get_detail_stat=True`` data on disk (the ``"forced_logical_error"``
+        column is fetched automatically). Cannot be combined with
+        ``separate_unconverged``.
     """
 
     metric_name: str
@@ -134,6 +148,7 @@ class PostSelectSpec:
     separate_unconverged: bool = False
     exact_gap_ranking: bool = False
     exact_gap_decoder_names: Optional[List[str]] = None
+    second_solution_gap_threshold: Optional[float] = None
 
     def __post_init__(self) -> None:
         split_metric = self.metric_name in {"linearize_logicalgap", "forced_gap_ml"}
@@ -165,6 +180,19 @@ class PostSelectSpec:
             raise ValueError(
                 "exact_gap_decoder_names requires exact_gap_ranking=True"
             )
+        if self.second_solution_gap_threshold is not None:
+            if self.metric_name != "linearize_logicalgap":
+                raise ValueError(
+                    "second_solution_gap_threshold is only supported for "
+                    "linearize_logicalgap"
+                )
+            if self.second_solution_gap_threshold >= 0:
+                raise ValueError("second_solution_gap_threshold must be negative")
+            if self.separate_unconverged:
+                raise ValueError(
+                    "second_solution_gap_threshold cannot be combined with "
+                    "separate_unconverged"
+                )
 
     def decoder_query_options(self) -> dict[str, Any]:
         """Return decoder-directory filters for this split configuration.
@@ -210,6 +238,10 @@ class PostSelectSpec:
         if self.separate_unconverged:
             options["extra_stat_files"] = [
                 {"file_stem": "decoder_stat", "columns": ["baseline_iteration"]}
+            ]
+        if self.second_solution_gap_threshold is not None:
+            options["extra_stat_files"] = [
+                {"file_stem": "detailed_stats", "columns": ["forced_logical_error"]}
             ]
         return options
 
@@ -436,6 +468,30 @@ def postselect_curve_unique_thresholds(
     )
 
 
+def _apply_second_solution_override(
+    values: np.ndarray,
+    is_error: np.ndarray,
+    forced_is_error: np.ndarray,
+    threshold: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reselect to the stage-2 (forced) solution for shots below *threshold*.
+
+    Implements ``PostSelectSpec.second_solution_gap_threshold``: for shots
+    whose gap value falls below the (negative) *threshold*, the stage-1
+    prediction is abandoned in favour of the stage-2 forced/reselected
+    candidate. The shot's error label switches to *forced_is_error* and its
+    gap value is negated (so it becomes positive, matching the convention
+    that a positive gap means an accepted/high-confidence shot). Shots at or
+    above *threshold* pass through unchanged.
+    """
+    override_mask = values < threshold
+    new_values = values.copy()
+    new_is_error = is_error.copy()
+    new_values[override_mask] = -values[override_mask]
+    new_is_error[override_mask] = forced_is_error[override_mask]
+    return new_values, new_is_error
+
+
 def postselect_curve_ar(
     df: pl.DataFrame,
     metric_name: str,
@@ -513,11 +569,21 @@ class PostSelectionPlotter:
         alpha: float = 0.05,
         shade_alpha: float = 0.2,
         reduction_rate: bool = False,
+        report_abort_rates: Optional[Sequence[float]] = None,
         **plot_kw: Any,
     ) -> None:
+        """Plot every spec's curve; optionally print LER at target abort rates.
+
+        report_abort_rates:
+            When given, for each spec (and each ``group_by`` partition) print
+            to stdout the post-selected LER at the curve point closest to
+            each requested abort rate — the same value that's plotted, just
+            read out numerically instead of eyeballed off the axes.
+        """
         for spec in specs:
             self._plot_spec(
-                spec, ax, num_points, alpha, shade_alpha, plot_kw, reduction_rate
+                spec, ax, num_points, alpha, shade_alpha, plot_kw, reduction_rate,
+                report_abort_rates,
             )
 
     def _plot_spec(
@@ -529,6 +595,7 @@ class PostSelectionPlotter:
         shade_alpha: float,
         plot_kw: dict,
         reduction_rate: bool,
+        report_abort_rates: Optional[Sequence[float]] = None,
     ) -> None:
         direction = spec.direction or _infer_direction(spec.metric_name)
 
@@ -552,9 +619,21 @@ class PostSelectionPlotter:
             needed.append("b")
         if spec.separate_unconverged:
             needed.append("baseline_iteration")
+        if spec.second_solution_gap_threshold is not None:
+            needed.append("forced_logical_error")
         schema_names = set(lf.collect_schema().names())
         existing = [c for c in dict.fromkeys(needed) if c in schema_names]
         df = lf.select(existing).collect()
+
+        if (
+            spec.second_solution_gap_threshold is not None
+            and "forced_logical_error" not in df.columns
+        ):
+            raise ValueError(
+                "second_solution_gap_threshold requires a 'forced_logical_error' "
+                "column, which was not found. Check that get_detail_stat=True "
+                f"data exists on disk for filters={spec.filters}."
+            )
 
         if spec.exact_gap_ranking and df.height == 0:
             raise ValueError(
@@ -579,12 +658,14 @@ class PostSelectionPlotter:
                 self._compute_and_plot(
                     part_df, spec, direction, ax,
                     num_points, alpha, shade_alpha, plot_kw, label, reduction_rate,
+                    report_abort_rates,
                 )
         else:
             label = f"{prefix}{spec.metric_name}{suffix}"
             self._compute_and_plot(
                 df, spec, direction, ax,
                 num_points, alpha, shade_alpha, plot_kw, label, reduction_rate,
+                report_abort_rates,
             )
 
     def _join_exact_gap_ranking(
@@ -641,6 +722,7 @@ class PostSelectionPlotter:
         plot_kw: dict,
         label: str,
         reduction_rate: bool,
+        report_abort_rates: Optional[Sequence[float]] = None,
     ) -> None:
         baseline_ler: Optional[float] = None
         if direction == "boolean":
@@ -652,13 +734,24 @@ class PostSelectionPlotter:
                 sub, spec, direction, num_points, alpha,
             )
         else:
-            sub = df.drop_nulls([spec.metric_name, "is_logical_error"])
+            drop_cols = [spec.metric_name, "is_logical_error"]
+            if spec.second_solution_gap_threshold is not None:
+                drop_cols.append("forced_logical_error")
+            sub = df.drop_nulls(drop_cols)
             values = sub[spec.metric_name].to_numpy().astype(float)
 
             if spec.round_digit is not None:
                 values = np.round(values, spec.round_digit)
 
             is_error = sub["is_logical_error"].to_numpy().astype(bool)
+
+            if spec.second_solution_gap_threshold is not None:
+                forced_is_error = sub["forced_logical_error"].to_numpy().astype(bool)
+                values, is_error = _apply_second_solution_override(
+                    values, is_error, forced_is_error,
+                    spec.second_solution_gap_threshold,
+                )
+
             if spec.threshold_mode == "unique":
                 curve = postselect_curve_unique_thresholds(
                     values, is_error, direction, alpha=alpha,
@@ -673,6 +766,11 @@ class PostSelectionPlotter:
 
         if curve.abort_rates.size == 0:
             return
+
+        if report_abort_rates:
+            self._report_at_target_abort_rates(
+                curve, report_abort_rates, label, reduction_rate, original_ler,
+            )
 
         y = curve.post_lers
         ci_lo = curve.ci_low
@@ -728,6 +826,50 @@ class PostSelectionPlotter:
             original_ler=original_ler,
             color=line.get_color(),
         )
+
+    @staticmethod
+    def _report_at_target_abort_rates(
+        curve: PostSelectCurve,
+        target_abort_rates: Sequence[float],
+        label: str,
+        reduction_rate: bool,
+        original_ler: float,
+    ) -> None:
+        """Print the curve's post-selected LER closest to each target abort rate.
+
+        Reads values off *curve* rather than recomputing anything, so the
+        printed numbers always match what ``ax.plot`` actually draws for
+        this spec — no separate approximation path to drift out of sync.
+        For ``threshold_mode="continuous"``, precision is limited by
+        ``num_points``; pass a larger grid if a target needs to land closer
+        to an exact abort rate.
+        """
+        print(f"[post-selection] {label}")
+        for target in target_abort_rates:
+            idx = int(np.argmin(np.abs(curve.abort_rates - target)))
+            actual_abort = float(curve.abort_rates[idx])
+            ler = float(curve.post_lers[idx])
+            ci_lo = float(curve.ci_low[idx])
+            ci_hi = float(curve.ci_high[idx])
+            n_acc = int(curve.accepted[idx])
+            n_err = int(curve.logical_errors[idx])
+
+            if reduction_rate and original_ler and original_ler > 0:
+                ler /= original_ler
+                ci_lo /= original_ler
+                ci_hi /= original_ler
+
+            if np.isnan(ler):
+                print(
+                    f"    target={target:.3g} -> actual abort_rate={actual_abort:.4g}: "
+                    f"no accepted shots"
+                )
+            else:
+                print(
+                    f"    target={target:.3g} -> actual abort_rate={actual_abort:.4g}, "
+                    f"LER={ler:.4g} (95% CI [{ci_lo:.4g}, {ci_hi:.4g}]), "
+                    f"n_accepted={n_acc}, errors={n_err}"
+                )
 
     def _compute_curve_separate_unconverged(
         self,

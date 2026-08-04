@@ -51,6 +51,8 @@ _INTERNAL_PLOT_PARAMS = frozenset(
         "convert_db",
         "use_linearize",
         "write_forced_unconv_line",
+        "highlight_stage2_correct",
+        "stage2_correct_label",
     }
 )
 
@@ -59,6 +61,20 @@ _INTERNAL_PLOT_PARAMS = frozenset(
 # meaningful. See RelayBpMetricDecoder._shot_forced_gap_ml /
 # _shot_linearized_logicalgap in src/decoder_confidence/decoding/_relay_bp.py.
 _FORCED_UNCONV_METRICS = frozenset({"forced_gap_ml", "linearize_logicalgap"})
+
+# Detail-stat column (from the "detailed_stats" parquet, see
+# result_collection.py's DETAIL_STAT_COLUMN_RENAMES) recording whether the
+# stage-2 forced/reselected minimum-weight candidate itself disagrees with
+# the true observable. Only meaningful for the same two-stage metrics as
+# _FORCED_UNCONV_METRICS; must be joined onto the queried LazyFrame by the
+# caller via ``PlotConfig.extra_options["extra_stat_files"]``, e.g.::
+#
+#     extra_options={
+#         "extra_stat_files": [
+#             {"file_stem": "detailed_stats", "columns": ["forced_logical_error"]}
+#         ]
+#     }
+_STAGE2_CORRECT_COLUMN = "forced_logical_error"
 
 # Metrics for which gap → dB conversion is meaningful.
 _GAP_METRICS = frozenset({"logical_gap", "linearize_logicalgap", "forced_gap_ml"})
@@ -100,9 +116,14 @@ def _effective_partition_keys(config: PlotConfig) -> list[str]:
 
 
 def _collect_for_plot(
-    lf: pl.LazyFrame, metric_name: str, partition_keys: list[str]
+    lf: pl.LazyFrame,
+    metric_name: str,
+    partition_keys: list[str],
+    extra_columns: list[str] | None = None,
 ) -> pl.DataFrame:
-    needed = list(dict.fromkeys([metric_name, "is_logical_error"] + partition_keys))
+    needed = list(dict.fromkeys(
+        [metric_name, "is_logical_error"] + partition_keys + list(extra_columns or [])
+    ))
     schema_names = set(lf.collect_schema().names())
     existing = [c for c in needed if c in schema_names]
     return lf.select(existing).collect()
@@ -364,6 +385,36 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
       ``config.separate_logical_error`` is ``True``, draws two lines split by
       outcome: red for shots that are logical errors, blue for shots that
       are not — matching the existing red/blue error-split scatter style.
+    * ``"highlight_stage2_correct"`` – only for ``forced_gap_ml`` and
+      ``linearize_logicalgap``. When ``True``, splits shots into three
+      *disjoint* series instead of the usual two:
+
+      - blue (``is_logical_error=False``): stage-1's own prediction is
+        already correct. Unaffected by this flag.
+      - orange triangle ("^"): stage-1's prediction was a logical error, but
+        the stage-2 forced/reselected minimum-weight candidate itself is
+        **not** (it agrees with the true observable). Pulled out of the red
+        series below.
+      - red: stage-1's prediction *and* the stage-2 candidate are **both**
+        logical errors — i.e. neither decode recovers the shot.
+
+      Without this flag, red would be "stage-1 is a logical error" alone
+      (which is a superset including the orange shots). This reads the
+      ``"forced_logical_error"`` detail-stat column, which is not part of the
+      metric/logical-error parquet pair and must be joined in by the caller
+      via ``config.extra_options["extra_stat_files"]``, e.g.::
+
+          extra_options={
+              "extra_stat_files": [
+                  {"file_stem": "detailed_stats", "columns": ["forced_logical_error"]},
+              ],
+          }
+
+      (requires ``get_detail_stat=True`` data on disk for that decoder/metric
+      directory; raises ``ValueError`` if the column is missing).
+    * ``"stage2_correct_label"`` – legend label for the
+      ``highlight_stage2_correct`` overlay (default ``"Stage-2 solution
+      correct"``).
 
     All other ``plot_params`` keys are forwarded to :func:`matplotlib.axes.Axes.scatter`.
     """
@@ -387,6 +438,12 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
         write_forced_unconv_line = bool(
             config.plot_params.get("write_forced_unconv_line", False)
         )
+        highlight_stage2_correct = bool(
+            config.plot_params.get("highlight_stage2_correct", False)
+        )
+        stage2_correct_label = config.plot_params.get(
+            "stage2_correct_label", "Stage-2 solution correct"
+        )
 
         if use_negative_gap:
             invalid = [n for n in metric_names if n not in _GAP_METRICS]
@@ -409,15 +466,31 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
                     "write_forced_unconv_line is only supported for: "
                     + ", ".join(sorted(_FORCED_UNCONV_METRICS))
                 )
+        if highlight_stage2_correct:
+            invalid = [n for n in metric_names if n not in _FORCED_UNCONV_METRICS]
+            if invalid:
+                raise ValueError(
+                    "highlight_stage2_correct is only supported for: "
+                    + ", ".join(sorted(_FORCED_UNCONV_METRICS))
+                )
 
         style_map = _metric_style_map(metric_names, ax) if multi_metric else {}
+        extra_columns = [_STAGE2_CORRECT_COLUMN] if highlight_stage2_correct else []
 
         for metric_name in metric_names:
-            df = _collect_for_plot(lf, metric_name, partition_keys)
+            df = _collect_for_plot(lf, metric_name, partition_keys, extra_columns)
             display_name = config.metric_labels.get(metric_name, metric_name)
 
             if write_forced_unconv_line:
                 self._draw_forced_unconv_line(ax, df, metric_name, config)
+
+            # When highlighting stage-2-correct shots as their own series, pull
+            # them out of the ordinary partitioned series first so the two are
+            # disjoint: e.g. the "is_logical_error=True" partition then means
+            # "stage-1 *and* stage-2 both got it wrong", not just stage-1.
+            plot_df = df
+            if highlight_stage2_correct:
+                plot_df = df.filter(pl.col(_STAGE2_CORRECT_COLUMN))
 
             scatter_kw = {k: v for k, v in config.plot_params.items()
                           if k not in _INTERNAL_PLOT_PARAMS}
@@ -430,13 +503,13 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
             if not partition_keys:
                 label = display_name if multi_metric else None
                 values = self._extract_values(
-                    df, metric_name, round_digits, use_negative_gap, convert_db
+                    plot_df, metric_name, round_digits, use_negative_gap, convert_db
                 )
                 self._plot_group(
                     ax, values, bins, alpha_ci, shade_alpha, scatter_kw, label=label
                 )
             else:
-                partitions: dict[tuple, pl.DataFrame] = df.partition_by(
+                partitions: dict[tuple, pl.DataFrame] = plot_df.partition_by(
                     partition_keys, as_dict=True
                 )
                 for key_vals in sorted(partitions):
@@ -455,6 +528,12 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
                     self._plot_group(
                         ax, values, bins, alpha_ci, shade_alpha, group_scatter_kw, label=label
                     )
+
+            if highlight_stage2_correct:
+                self._plot_stage2_correct_overlay(
+                    ax, df, metric_name, round_digits, use_negative_gap, convert_db,
+                    bins, alpha_ci, shade_alpha, stage2_correct_label,
+                )
 
     def logical_error_rate(
         self,
@@ -752,6 +831,44 @@ class NumericMetricAnalyzer(AbstractMetricAnalyzer):
             n_unconv = int(unconverged.sum())
             if n_unconv > 0:
                 ax.axhline(n_unconv, color="black", **line_kw)
+
+    def _plot_stage2_correct_overlay(
+        self,
+        ax: plt.Axes,
+        df: pl.DataFrame,
+        metric_name: str,
+        round_digits: int | None,
+        use_negative_gap: bool,
+        convert_db: bool,
+        bins: int | None,
+        alpha_ci: float,
+        shade_alpha: float,
+        label: str,
+    ) -> None:
+        """Overlay shots whose stage-2 forced/reselected candidate is correct.
+
+        "Correct" means the lightest stage-2 candidate itself agrees with the
+        true observable (``forced_logical_error is False``) -- independent of
+        whether the shot's own final (stage-1) prediction was a logical error.
+        Drawn as orange triangles on top of the ordinary distribution.
+        """
+        if _STAGE2_CORRECT_COLUMN not in df.columns:
+            raise ValueError(
+                "highlight_stage2_correct requires a "
+                f"'{_STAGE2_CORRECT_COLUMN}' column, which was not found. Join it via "
+                "config.extra_options={'extra_stat_files': [{'file_stem': "
+                "'detailed_stats', 'columns': ['forced_logical_error']}]} "
+                "(requires get_detail_stat=True data on disk)."
+            )
+
+        sub = df.filter(~pl.col(_STAGE2_CORRECT_COLUMN))
+        values = self._extract_values(
+            sub, metric_name, round_digits, use_negative_gap, convert_db
+        )
+        self._plot_group(
+            ax, values, bins, alpha_ci, shade_alpha,
+            {"color": "orange", "marker": "^"}, label=label,
+        )
 
     def _extract_values(
         self,

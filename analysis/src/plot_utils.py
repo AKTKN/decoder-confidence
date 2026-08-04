@@ -174,7 +174,12 @@ def draw_post_selection(
     ax: plt.Axes,
     **plot_kw: Any,
 ) -> plt.Axes:
-    """Draw post-selection (abort rate vs. LER) curves onto *ax*."""
+    """Draw post-selection (abort rate vs. LER) curves onto *ax*.
+
+    Pass ``report_abort_rates=[0.1, 0.3, ...]`` to also print, for each
+    spec, the post-selected LER at the curve point closest to each of
+    those abort rates (see :meth:`PostSelectionPlotter.plot`).
+    """
     PostSelectionPlotter(manager).plot(list(specs), ax, **plot_kw)
     return ax
 
