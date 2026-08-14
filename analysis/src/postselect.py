@@ -38,6 +38,7 @@ HIGH_CONFIDENCE_METRICS: frozenset[str] = frozenset(
         "linearize_logicalgap",
         "reweighted_linearized_gap",
         "forced_gap_ml",
+        "wills_reproduce",
     }
 )
 LOW_CONFIDENCE_METRICS: frozenset[str] = frozenset({"cluster_llr"})

@@ -21,6 +21,7 @@ from decoder_confidence.decoding._lsd_cluster_metric import make_cluster_llr_fac
 from decoder_confidence.decoding._reweighted_linearized_gap import (
     make_reweighted_linearized_gap_factory,
 )
+from decoder_confidence.decoding._wills_reproduce import make_wills_reproduce_factory
 from decoder_confidence.execution.models import DecoderFactory
 
 
@@ -102,6 +103,23 @@ def load_decoder_factory(
 
     if metric_name == "forced_gap_ml":
         factory = make_forced_gap_ml_factory(
+            dem_path,
+            decoder_name,
+            decoder_options,
+            metric_options,
+        )
+        info = DecoderConfigInfo(
+            decoder_name=decoder_name,
+            metric_name=metric_name,
+            decoder_options=dict(decoder_options),
+            metric_options=dict(metric_options),
+            config_path=config_path,
+            raw_config=dict(config),
+        )
+        return factory, info
+
+    if metric_name == "wills_reproduce":
+        factory = make_wills_reproduce_factory(
             dem_path,
             decoder_name,
             decoder_options,
