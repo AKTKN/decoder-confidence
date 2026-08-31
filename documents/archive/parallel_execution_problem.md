@@ -1,3 +1,9 @@
+> Archived 2026-08-31. This bug (concurrent-batch NFS races in result
+> collection/metadata writes) is fixed in current code — the atomic
+> temp-file-plus-`os.replace()` pattern this report introduced is now
+> documented in `USAGE.md` ("Atomic writes") and `ARCHITECTURE.md` ("The
+> result-collection path"). Kept verbatim below for the original record.
+
 まずコードベースを調査します。
 
 Ran terminal command: find /home/quantum_teresheys/workspace/decoder-confidence/src/decoder_confidence -type f -name "*.py" | sort
