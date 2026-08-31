@@ -1,3 +1,11 @@
+> Archived 2026-08-31. The "Logical gap Bug" section was migrated (translated,
+> confirmed/hypothesis-labeled) to `FUTURE.md` §1.1; the "cluster llr by
+> vibeLSD" design note was migrated to `ARCHITECTURE.md` ("Design note —
+> `cluster_llr` via BP-LSD"); the "To do" items are resolved in current code;
+> the "Future work" and "Analysis Module" items are either implemented
+> (`analysis/src/`, `cluster_llr`, VIBE-LSD) or carried forward as open items
+> in `FUTURE.md` §2/§5. Kept verbatim below for the original record.
+
 ## To do
 
 - demからcheckmatrixを作る際、hyperedgeをedge-mechanismにdecomposeするかをoptionで選択できるようにする必要がある。例えば、表面符号の場合、XYZ-decodingだとmatchingとの比較ができない。

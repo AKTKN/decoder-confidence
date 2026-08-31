@@ -130,7 +130,7 @@ def _build_ilp_gap_decoder(env, dem):
 
 
 @pytest.fixture(scope="module")
-def gurobi_env():
+def gurobi_env(_gurobi_opt_in):
     gp = pytest.importorskip("gurobipy")
     try:
         env = gp.Env(empty=True)
@@ -148,6 +148,7 @@ def gurobi_env():
 
 
 @pytest.mark.e2e
+@pytest.mark.gurobi
 def test_obs_flip_idx_direct_decoder(gurobi_env):
     """Run the ILP gap decoder on a small batch and verify obs_flip_idx properties.
 
@@ -205,6 +206,7 @@ def test_obs_flip_idx_direct_decoder(gurobi_env):
 
 
 @pytest.mark.e2e
+@pytest.mark.gurobi
 def test_obs_flip_idx_matches_z_vars(gurobi_env):
     """Verify obs_flip_idx exactly matches z_vars from the gap ILP by re-solving.
 
@@ -333,6 +335,7 @@ def test_obs_flip_idx_pipeline_output(tmp_path):
 
 
 @pytest.mark.e2e
+@pytest.mark.gurobi
 def test_obs_flip_idx_binary_file_validity(gurobi_env):
     """Verify the binary file produced by the pipeline has structurally valid content.
 

@@ -20,12 +20,16 @@ dependencies = [
 [project.optional-dependencies]
 ilp = [
 	"gurobipy",
+	"ilp-decoder @ git+https://github.com/AKTKN/ILP-decoder.git@308d41ea0db1625e3070ff4577d67b9c19e5a03f",
 ]
 mwpm = [
 	"pymatching",
 ]
 bplsd = [
 	"ldpc",
+]
+relay = [
+	"relay-bp @ git+https://github.com/trmue/relay.git@v0.2.2",
 ]
 analysis = [
 	"matplotlib",
@@ -40,4 +44,5 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
 	"e2e: end-to-end tests",
+	"gurobi: calls the real Gurobi API; requires RUN_GUROBI_TESTS=1 (see tests/conftest.py)",
 ]

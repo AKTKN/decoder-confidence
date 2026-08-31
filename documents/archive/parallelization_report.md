@@ -1,3 +1,11 @@
+> Archived 2026-08-31. The double-spawn-cycle fix this report diagnoses is
+> present in current code (`execution/manager.py` merges the probe into the
+> main pool — see the "run probe inside the already-initialised pool"
+> comment there) and is documented in `ARCHITECTURE.md`'s "The execution
+> model". It does **not** cover the still-open probe-timeout gap left behind
+> by that same code path — see `FUTURE.md` §1.2. Kept verbatim below for the
+> original diagnosis and reasoning.
+
 # Parallelization Bottleneck Report: ILP Decoder Simulation
 
 ## Summary
